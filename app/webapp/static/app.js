@@ -2,14 +2,17 @@ const tg = window.Telegram?.WebApp;
 const state = {
   bootstrap: null,
   activeView: "dashboard",
+  activePane: "phone",
+  activeAccountId: null,
+  noticeTimer: null,
 };
+
+const qs = (selector, root = document) => root.querySelector(selector);
+const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function telegramInitData() {
   const sdkValue = window.Telegram?.WebApp?.initData;
   if (sdkValue) return sdkValue;
-
-  // Keep a small compatibility fallback for clients that supplied the launch
-  // fragment before the Telegram SDK finished exposing WebApp.initData.
   try {
     return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("tgWebAppData") || "";
   } catch (_) {
@@ -27,27 +30,6 @@ async function waitForTelegramInitData(timeoutMs = 1500) {
   return value;
 }
 
-if (tg) {
-  const platform = String(tg.platform || "");
-  document.body.classList.toggle(
-    "telegram-desktop",
-    ["tdesktop", "weba", "web", "desktop", "macos", "windows"].includes(platform)
-  );
-  tg.ready();
-  tg.expand();
-  tg.BackButton?.onClick(() => switchView("dashboard"));
-  if (typeof tg.requestFullscreen === "function") {
-    try {
-      tg.requestFullscreen();
-    } catch (_) {
-      // Fullscreen support depends on the Telegram client.
-    }
-  }
-}
-
-const qs = (selector, root = document) => root.querySelector(selector);
-const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
-
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;",
@@ -59,17 +41,52 @@ function escapeHtml(value) {
 }
 
 function statusClass(status) {
-  return ["normal", "limited", "banned", "unknown", "active", "new", "session_invalid"]
+  return ["normal", "limited", "banned", "unknown", "active", "new", "session_invalid", "running", "pending", "completed", "succeeded", "finished", "finished_with_errors", "failed"]
     .includes(status) ? status : "unknown";
+}
+
+function statusLabel(status) {
+  const labels = {
+    normal: "正常", limited: "限制", banned: "封禁", unknown: "未知",
+    active: "未检测", new: "未检测", session_invalid: "Session 失效",
+    pending: "等待中", running: "运行中", completed: "已完成", finished: "已完成",
+    succeeded: "已成功", failed: "失败", partial: "部分完成", finished_with_errors: "部分失败",
+  };
+  return labels[status] || status || "未知";
+}
+
+function formatTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }).format(date);
 }
 
 function showNotice(text, type = "") {
   const box = qs("#notice");
+  window.clearTimeout(state.noticeTimer);
   box.textContent = text;
   box.className = `notice ${type}`.trim();
   if (!text) box.classList.add("hidden");
   if (text && ["ok", "error"].includes(type)) {
     tg?.HapticFeedback?.notificationOccurred(type === "ok" ? "success" : "error");
+  }
+  if (text && type === "ok") {
+    state.noticeTimer = window.setTimeout(() => showNotice(""), 3200);
+  }
+}
+
+function setBusy(button, busy, busyText = "处理中…") {
+  if (!button) return;
+  if (busy) {
+    button.dataset.originalText = button.textContent;
+    button.textContent = busyText;
+    button.disabled = true;
+  } else {
+    button.textContent = button.dataset.originalText || button.textContent;
+    button.disabled = false;
   }
 }
 
@@ -81,12 +98,11 @@ function confirmAction(message) {
 }
 
 async function api(path, options = {}) {
-  const initData = telegramInitData();
   const isFormData = options.body instanceof FormData;
   const response = await fetch(`/mini-app/api${path}`, {
     ...options,
     headers: {
-      "X-Telegram-Init-Data": initData,
+      "X-Telegram-Init-Data": telegramInitData(),
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers || {}),
     },
@@ -99,23 +115,18 @@ async function api(path, options = {}) {
 }
 
 async function downloadApi(path, payload) {
-  const initData = telegramInitData();
   const response = await fetch(`/mini-app/api${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Telegram-Init-Data": initData,
+      "X-Telegram-Init-Data": telegramInitData(),
     },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
   const blob = await response.blob();
   const disposition = response.headers.get("Content-Disposition") || "";
-  const match = disposition.match(/filename="([^"]+)"/);
-  const filename = match ? match[1] : "tg_sessions.txt";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "tg_sessions.txt";
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -130,81 +141,93 @@ async function downloadApi(path, payload) {
   };
 }
 
+const pageMeta = {
+  dashboard: ["CONTROL CENTER", "运行概览"],
+  accounts: ["ACCOUNTS", "账号管理"],
+  actions: ["OPERATIONS", "快捷操作"],
+  settings: ["CONFIGURATION", "运行设置"],
+};
+
 function switchView(view) {
+  if (!pageMeta[view]) return;
   state.activeView = view;
+  if (view !== "accounts") closeAccountDetail(false);
   qsa(".tab").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
   qsa(".view").forEach((section) => section.classList.remove("active"));
-  qs(`#${view}View`).classList.add("active");
-  if (tg?.BackButton) {
-    if (view === "dashboard") tg.BackButton.hide();
-    else tg.BackButton.show();
-  }
+  qs(`#${view}View`)?.classList.add("active");
+  qs("#pageEyebrow").textContent = pageMeta[view][0];
+  qs("#pageTitle").textContent = pageMeta[view][1];
+  updateBackButton();
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function statusLabel(status) {
-  const labels = {
-    normal: "正常",
-    limited: "限制",
-    banned: "封禁",
-    unknown: "未知",
-    active: "未检测",
-    new: "未检测",
-    session_invalid: "Session失效",
-  };
-  return labels[status] || status || "未知";
+function switchActionPane(pane) {
+  if (!qs(`.action-pane[data-pane="${pane}"]`)) return;
+  state.activePane = pane;
+  qsa(".segment").forEach((button) => button.classList.toggle("active", button.dataset.actionPane === pane));
+  qsa(".action-pane").forEach((section) => section.classList.toggle("active", section.dataset.pane === pane));
+}
+
+function updateBackButton() {
+  if (!tg?.BackButton) return;
+  if (state.activeAccountId || state.activeView !== "dashboard") tg.BackButton.show();
+  else tg.BackButton.hide();
 }
 
 function accountRow(account, compact = false) {
   const row = document.createElement("article");
-  row.className = "account-row";
-  const name = escapeHtml(account.name || "-");
-  const username = escapeHtml(account.username ? `@${account.username}` : "-");
+  row.className = `account-row${compact ? " compact-row" : ""}`;
+  const displayName = account.name || account.username || account.phone_masked || `账号 ${account.id}`;
+  const secondary = account.username ? `@${account.username}` : account.phone_masked;
+  const initial = String(displayName).trim().slice(0, 1).toUpperCase() || "T";
   row.innerHTML = `
     <div class="row-main">
-      <div>
-        <div class="row-title">#${Number(account.id)} ${escapeHtml(account.phone_masked)}</div>
-        <div class="row-meta">${username} · ${name} · TG ${escapeHtml(account.user_id || "-")}</div>
+      <div class="row-identity">
+        <span class="avatar">${escapeHtml(initial)}</span>
+        <div>
+          <div class="row-title">${escapeHtml(displayName)} <span class="muted">#${Number(account.id)}</span></div>
+          <div class="row-meta">${escapeHtml(secondary)} · TG ${escapeHtml(account.user_id || "—")}</div>
+        </div>
       </div>
       <span class="status ${statusClass(account.status)}">${escapeHtml(statusLabel(account.status))}</span>
-    </div>
-  `;
+    </div>`;
   if (!compact) {
-    const actions = document.createElement("div");
-    actions.className = "row-actions";
-    actions.innerHTML = `
-      <button class="text-button" type="button" data-action="detail">详情</button>
-      <button class="text-button" type="button" data-action="export_session">导出</button>
-      <button class="text-button" type="button" data-action="refresh_status">刷新检测</button>
-      <button class="text-button" type="button" data-action="reconnect">重连</button>
-      <button class="text-button" type="button" data-action="spam">SpamBot</button>
-      <button class="text-button" type="button" data-action="service_check">服务消息</button>
-    `;
-    actions.addEventListener("click", (event) => {
-      const action = event.target?.dataset?.action;
-      if (!action) return;
-      if (action === "detail") {
-        loadAccountDetail(account.id);
-      } else if (action === "export_session") {
-        exportSessions({ mode: "single", account_id: account.id });
-      } else {
-        runAccountAction(account.id, action);
-      }
-    });
-    row.append(actions);
+    const footer = document.createElement("div");
+    footer.className = "account-card-footer";
+    footer.innerHTML = `<small>${account.last_login_at ? `最近登录 ${escapeHtml(formatTime(account.last_login_at))}` : "暂无登录时间"}</small><button class="link-button" type="button">管理 ›</button>`;
+    row.append(footer);
   }
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.addEventListener("click", () => openAccountDetail(account.id));
+  row.addEventListener("keydown", (event) => {
+    if (["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      openAccountDetail(account.id);
+    }
+  });
   return row;
 }
 
 function renderBootstrap(data) {
   state.bootstrap = data;
-  qs("#metricAccounts").textContent = data.status.accounts;
-  qs("#metricUsable").textContent = data.status.usable;
-  qs("#metricConnected").textContent = data.status.connected;
-  qs("#metricMonitor").textContent = data.status.monitor_enabled ? "开启" : "关闭";
-  qs("#metricJobs").textContent = data.status.running_jobs;
+  const status = data.status;
+  qs("#metricAccounts").textContent = status.accounts;
+  qs("#metricUsable").textContent = `${status.usable} 个 active`;
+  qs("#metricConnected").textContent = status.connected;
+  qs("#connectedHint").textContent = `${status.connected}/${status.usable} 个 active 已连接`;
+  const monitorRunning = Boolean(status.monitor_enabled && status.monitor_running);
+  qs("#metricMonitor").textContent = monitorRunning ? "运行中" : "未运行";
+  qs("#monitorHint").textContent = status.monitor_enabled && !status.monitor_running ? "开关已开，但任务异常" : monitorRunning ? "后台任务正常" : "实时保护已停止";
+  qs("#metricJobs").textContent = status.running_jobs;
+  qs("#monitorToggleBtn").textContent = monitorRunning ? "关闭监听" : "开启监听";
+  qs("#monitorToggleBtn").classList.toggle("danger-button", monitorRunning);
+  qs("#sidebarStatus").textContent = monitorRunning ? "服务与监听在线" : "服务在线，监听未运行";
+  qs(".live-dot")?.classList.toggle("online", monitorRunning);
 
   const recent = qs("#recentAccounts");
-  recent.replaceChildren(...data.accounts.slice(0, 8).map((account) => accountRow(account, true)));
+  recent.replaceChildren(...data.accounts.slice(0, 6).map((account) => accountRow(account, true)));
+  if (!data.accounts.length) recent.innerHTML = '<div class="empty-state">还没有账号，先添加一个账号</div>';
   renderAccounts(data.accounts);
   renderTargets(data.targets);
   renderRates(data.rates);
@@ -213,494 +236,452 @@ function renderBootstrap(data) {
 function renderAccounts(accounts) {
   const list = qs("#accountsList");
   list.replaceChildren(...accounts.map((account) => accountRow(account)));
+  qs("#accountCount").textContent = `共 ${accounts.length} 个账号`;
+  if (!accounts.length) list.innerHTML = '<div class="panel empty-state">没有匹配的账号</div>';
 }
 
 function renderTargets(targets) {
   const list = qs("#targetsList");
-  list.replaceChildren(
-    ...targets.map((target) => {
-      const row = document.createElement("article");
-      row.className = "account-row";
-      row.innerHTML = `
-        <div class="row-main">
-          <div>
-            <div class="row-title">${escapeHtml(target.target_ref)}</div>
-            <div class="row-meta">${escapeHtml(target.target_type)} · ${escapeHtml(target.title || "-")}</div>
-          </div>
-          <button class="text-button" type="button">删除</button>
-        </div>
-      `;
-      qs("button", row).addEventListener("click", () => removeTarget(target.target_ref));
-      return row;
-    })
-  );
+  list.replaceChildren(...targets.map((target) => {
+    const row = document.createElement("article");
+    row.className = "account-row";
+    const ref = escapeHtml(target.target_ref);
+    row.innerHTML = `<div class="row-main"><div><div class="row-title">${ref}</div><div class="row-meta">${escapeHtml(target.target_type)} · ${escapeHtml(target.title || "未备注")}</div></div><button class="link-button" type="button">删除</button></div>`;
+    qs("button", row).addEventListener("click", () => removeTarget(target.target_ref));
+    return row;
+  }));
+  if (!targets.length) list.innerHTML = '<div class="empty-state">暂未授权任何目标</div>';
 }
 
 function renderRates(rates) {
   const list = qs("#ratesList");
-  list.replaceChildren(
-    ...rates.map((rate) => {
-      const row = document.createElement("article");
-      row.className = "account-row";
-      row.innerHTML = `
-        <div class="row-title">${escapeHtml(rate.scope)}</div>
-        <div class="row-meta">${Number(rate.max_actions)}/${Number(rate.per_seconds)}s · jitter ${Number(rate.jitter_min)}-${Number(rate.jitter_max)}s</div>
-      `;
-      if (rate.scope === "batch") {
-        qs("[name=max_actions]").value = rate.max_actions;
-        qs("[name=per_seconds]").value = rate.per_seconds;
-        qs("[name=jitter_min]").value = rate.jitter_min;
-        qs("[name=jitter_max]").value = rate.jitter_max;
-      }
-      return row;
-    })
-  );
+  list.replaceChildren(...rates.map((rate) => {
+    const row = document.createElement("article");
+    row.className = "account-row compact-row";
+    row.innerHTML = `<div class="row-title">${escapeHtml(rate.scope)}</div><div class="row-meta">${Number(rate.max_actions)} 次 / ${Number(rate.per_seconds)} 秒 · 随机等待 ${Number(rate.jitter_min)}–${Number(rate.jitter_max)} 秒</div>`;
+    if (rate.scope === "batch") {
+      qs("#rateForm [name=max_actions]").value = rate.max_actions;
+      qs("#rateForm [name=per_seconds]").value = rate.per_seconds;
+      qs("#rateForm [name=jitter_min]").value = rate.jitter_min;
+      qs("#rateForm [name=jitter_max]").value = rate.jitter_max;
+    }
+    return row;
+  }));
 }
 
-async function loadBootstrap() {
+async function loadBootstrap({ quiet = false } = {}) {
   const initData = await waitForTelegramInitData();
   if (!initData) {
-    const platform = String(tg?.platform || "unknown");
-    const message = platform === "unknown"
-      ? "当前是普通浏览器页面，Telegram 无法提供安全登录信息。请返回 @tgmagnotice_bot，点击“内置应用”按钮打开，不要复制网页链接。"
-      : "Telegram 未提供登录信息。请关闭此页，返回 Bot 后通过最新的“内置应用”按钮重新打开。";
+    const message = tg
+      ? "Telegram 未提供登录信息。请关闭此页，再从机器人资料页的“打开应用”按钮进入。"
+      : "当前页面缺少 Telegram 安全登录信息，请从机器人资料页的“打开应用”按钮进入。";
     showNotice(message, "error");
     return;
   }
-  showNotice("正在加载...");
+  const refresh = qs("#refreshBtn");
+  refresh.classList.add("busy");
+  if (!quiet) showNotice("正在同步运行数据…");
   try {
     const data = await api("/bootstrap");
     renderBootstrap(data);
-    showNotice("");
+    if (!quiet) showNotice("");
+    loadJobs();
   } catch (error) {
     showNotice(`加载失败：${error.message}`, "error");
+  } finally {
+    refresh.classList.remove("busy");
+  }
+}
+
+async function loadJobs() {
+  try {
+    const data = await api("/jobs?limit=8");
+    const list = qs("#jobsList");
+    list.replaceChildren(...data.jobs.map((job) => {
+      const row = document.createElement("article");
+      row.className = "account-row compact-row";
+      const succeeded = Number(job.items?.ok || job.items?.succeeded || job.items?.success || 0);
+      const failed = Number(job.items?.failed || 0);
+      row.innerHTML = `<div class="row-main"><div><div class="row-title">任务 #${Number(job.id)} · ${escapeHtml(job.type)}</div><div class="row-meta">${escapeHtml(formatTime(job.started_at))} · 成功 ${succeeded} / 失败 ${failed}${job.error ? ` · <span class="job-error">${escapeHtml(job.error)}</span>` : ""}</div></div><span class="status ${statusClass(job.status)}">${escapeHtml(statusLabel(job.status))}</span></div>`;
+      return row;
+    }));
+    if (!data.jobs.length) list.innerHTML = '<div class="empty-state">暂无任务记录</div>';
+  } catch (error) {
+    qs("#jobsList").innerHTML = `<div class="empty-state">任务记录加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function runSecurityCheck() {
+  const button = qs("#securityCheckBtn");
+  setBusy(button, true, "正在逐项检测…");
+  qs("#healthTitle").textContent = "正在验证真实运行链路";
+  qs("#healthDescription").textContent = "正在连接数据库、Gmail IMAP，并核对监听任务和全部 active 账号连接。";
+  try {
+    const data = await api("/security-health");
+    qs("#healthIcon").className = `health-icon ${data.available ? "pass" : "fail"}`;
+    qs("#healthIcon").textContent = data.available ? "✓" : "!";
+    qs("#healthTitle").textContent = data.available ? "安全防护链路可用" : "安全防护链路不可用";
+    qs("#healthDescription").textContent = `${data.summary} · 检测于 ${formatTime(data.checked_at)}`;
+    const checks = qs("#healthChecks");
+    checks.classList.remove("hidden");
+    checks.replaceChildren(...data.checks.map((check) => {
+      const row = document.createElement("div");
+      row.className = "health-row";
+      const icon = document.createElement("span");
+      icon.className = `check-icon ${check.status}`;
+      icon.textContent = check.status === "pass" ? "✓" : check.status === "warn" ? "△" : "×";
+      const name = document.createElement("strong");
+      name.textContent = check.name;
+      const detail = document.createElement("div");
+      detail.textContent = check.detail;
+      if (check.status !== "pass" && check.fix) {
+        const fix = document.createElement("div");
+        fix.className = "fix-note";
+        fix.textContent = `修复：${check.fix}`;
+        detail.append(fix);
+      }
+      row.append(icon, name, detail);
+      return row;
+    }));
+    if (!data.available) tg?.HapticFeedback?.notificationOccurred("error");
+  } catch (error) {
+    qs("#healthIcon").className = "health-icon fail";
+    qs("#healthIcon").textContent = "!";
+    qs("#healthTitle").textContent = "检测请求失败";
+    qs("#healthDescription").textContent = error.message;
+    showNotice(`安全检测失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function toggleMonitor() {
+  const currentlyRunning = Boolean(state.bootstrap?.status?.monitor_enabled && state.bootstrap?.status?.monitor_running);
+  const action = currentlyRunning ? "off" : "on";
+  if (action === "off" && !(await confirmAction("关闭实时监听会断开全部账号，并暂停登录安全提醒。确认继续？"))) return;
+  const button = qs("#monitorToggleBtn");
+  setBusy(button, true, action === "on" ? "正在连接账号…" : "正在停止…");
+  try {
+    const data = await api("/monitor", { method: "POST", body: JSON.stringify({ action }) });
+    showNotice(data.message, "ok");
+    await loadBootstrap({ quiet: true });
+  } catch (error) {
+    showNotice(`监听操作失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function searchAccounts() {
+  const button = qs("#searchBtn");
+  setBusy(button, true, "搜索中…");
   try {
-    const q = encodeURIComponent(qs("#accountSearch").value.trim());
-    const data = await api(`/accounts?q=${q}`);
+    const query = encodeURIComponent(qs("#accountSearch").value.trim());
+    const data = await api(`/accounts?q=${query}`);
     renderAccounts(data.accounts);
-    showNotice("");
   } catch (error) {
     showNotice(`搜索失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
   }
+}
+
+function closeAccountDetail(scroll = true) {
+  state.activeAccountId = null;
+  qs("#accountDetail")?.classList.add("hidden");
+  qs("#accountBrowser")?.classList.remove("hidden");
+  if (state.activeView === "accounts") {
+    qs("#pageTitle").textContent = pageMeta.accounts[1];
+    if (scroll) window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  updateBackButton();
+}
+
+async function openAccountDetail(accountId) {
+  switchView("accounts");
+  state.activeAccountId = Number(accountId);
+  qs("#accountBrowser").classList.add("hidden");
+  const detail = qs("#accountDetail");
+  detail.classList.remove("hidden");
+  detail.innerHTML = '<div class="panel empty-state">正在加载账号详情…</div>';
+  qs("#pageTitle").textContent = `账号 #${Number(accountId)}`;
+  updateBackButton();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  try {
+    const data = await api(`/accounts/${accountId}`);
+    if (state.activeAccountId !== Number(accountId)) return;
+    renderAccountDetail(data.account);
+  } catch (error) {
+    detail.innerHTML = `<div class="panel empty-state">详情加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderAccountDetail(account) {
+  const detail = qs("#accountDetail");
+  const privacyCount = Object.keys(account.privacy || {}).length;
+  const displayName = account.name || account.username || account.phone_masked;
+  detail.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-title"><button class="back-button" type="button" aria-label="返回账号列表">‹</button><div><h2>${escapeHtml(displayName)} <span class="muted">#${Number(account.id)}</span></h2><p>${escapeHtml(account.username ? `@${account.username}` : account.phone_masked)}</p></div></div>
+      <span class="status ${statusClass(account.status)}">${escapeHtml(statusLabel(account.status))}</span>
+    </div>
+    <div class="detail-summary">
+      <div class="detail-stat"><span>TELEGRAM ID</span><strong>${escapeHtml(account.user_id || "—")}</strong></div>
+      <div class="detail-stat"><span>ACTIVE SESSION</span><strong>${account.has_active_session ? "可用" : "不可用"}</strong></div>
+      <div class="detail-stat"><span>2FA</span><strong>${account.has_2fa ? "已启用" : "未启用 / 未知"}</strong></div>
+      <div class="detail-stat"><span>SPAMBOT</span><strong>${escapeHtml(account.latest_spam ? statusLabel(account.latest_spam.status) : "未检测")}</strong></div>
+    </div>
+    <div class="detail-actions">
+      <button class="primary-button" type="button" data-account-action="refresh_status">完整刷新检测</button>
+      <button class="secondary-button" type="button" data-account-action="reconnect">重新连接</button>
+      <button class="secondary-button" type="button" data-account-action="spam">检查 SpamBot</button>
+      <button class="secondary-button" type="button" data-account-action="service_check">同步服务消息</button>
+      <button class="secondary-button" type="button" data-account-action="export_session">导出 Session</button>
+    </div>
+    <div class="detail-sections">
+      <details class="detail-section" open><summary>资料与头像</summary><div class="detail-section-body">
+        <form id="profileForm" class="form">
+          <div class="split"><label><span>First Name</span><input name="first_name" value="${escapeHtml(account.first_name || "")}" /></label><label><span>Last Name</span><input name="last_name" value="${escapeHtml(account.last_name || "")}" /></label></div>
+          <label><span>用户名</span><input name="username" value="${escapeHtml(account.username || "")}" placeholder="不用带 @" /></label>
+          <label><span>简介（留空不修改）</span><textarea name="bio" rows="3" placeholder="输入新简介"></textarea></label>
+          <button class="primary-button" type="submit">保存资料</button>
+        </form>
+        <div class="form-divider"><span>头像</span></div>
+        <form id="avatarForm" class="form"><label><span>上传图片，最大 5MB</span><input name="avatar" type="file" accept="image/*" /></label><div class="button-row"><button class="secondary-button" type="submit" data-mode="random">使用随机头像</button><button class="primary-button" type="submit" data-mode="upload">上传头像</button></div></form>
+      </div></details>
+      <details class="detail-section"><summary>隐私设置 <span class="muted">已保存 ${privacyCount} 项</span></summary><div class="detail-section-body"><form id="privacyForm" class="form"><div class="split"><label><span>隐私项</span><select name="key"><option value="phone">手机号</option><option value="last_seen">在线时间</option><option value="profile_photo">头像</option><option value="forwards">转发来源</option><option value="calls">通话</option><option value="groups">拉群</option></select></label><label><span>允许范围</span><select name="rule"><option value="everybody">所有人</option><option value="contacts">联系人</option><option value="nobody">没有人</option></select></label></div><button class="primary-button" type="submit">保存该项隐私</button></form></div></details>
+      <details class="detail-section"><summary>两步验证（2FA）</summary><div class="detail-section-body"><form id="twofaForm" class="form"><label><span>操作</span><select name="action"><option value="check">查询状态</option><option value="set">设置 2FA</option><option value="change">修改 2FA</option><option value="email">配置 2FA 邮箱</option><option value="disable">关闭 2FA</option><option value="confirm">确认邮箱验证码</option></select></label><div class="split"><label><span>当前密码</span><input name="current_password" type="password" autocomplete="current-password" /></label><label><span>新密码</span><input name="new_password" type="password" autocomplete="new-password" /></label></div><div class="split"><label><span>密码提示</span><input name="hint" /></label><label><span>恢复邮箱</span><input name="email" type="email" /></label></div><label><span>邮箱验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><button class="primary-button" type="submit">执行 2FA 操作</button></form></div></details>
+      <details class="detail-section"><summary>登录邮箱</summary><div class="detail-section-body"><form id="loginEmailForm" class="form"><label><span>新登录邮箱</span><input name="email" type="email" /></label><label><span>邮箱验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><div class="button-row"><button class="secondary-button" type="submit" data-action="send">发送验证码</button><button class="primary-button" type="submit" data-action="confirm">确认验证码</button></div></form></div></details>
+      <details class="detail-section"><summary>Telegram 服务消息</summary><div class="detail-section-body"><button class="secondary-button" id="loadServiceMessagesBtn" type="button">加载最近消息</button><div id="serviceMessagesList" class="list"></div></div></details>
+    </div>`;
+  qs(".back-button", detail).addEventListener("click", () => closeAccountDetail());
+  qsa("[data-account-action]", detail).forEach((button) => button.addEventListener("click", () => {
+    const action = button.dataset.accountAction;
+    if (action === "export_session") exportSessions({ mode: "single", account_id: account.id }, button);
+    else runAccountAction(account.id, action, button);
+  }));
+  qs("#profileForm", detail).addEventListener("submit", (event) => submitProfile(event, account.id));
+  qs("#avatarForm", detail).addEventListener("submit", (event) => submitAvatar(event, account.id));
+  qs("#privacyForm", detail).addEventListener("submit", (event) => submitPrivacy(event, account.id));
+  qs("#twofaForm", detail).addEventListener("submit", (event) => submitTwoFA(event, account.id));
+  qs("#loginEmailForm", detail).addEventListener("submit", (event) => submitLoginEmail(event, account.id));
+  qs("#loadServiceMessagesBtn", detail).addEventListener("click", (event) => loadServiceMessages(account.id, event.currentTarget));
 }
 
 async function submitPhoneLogin(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const step = event.submitter?.dataset?.step || "start";
+  const button = event.submitter;
+  const step = button?.dataset.step || "start";
   const payload = Object.fromEntries(new FormData(form).entries());
+  setBusy(button, true, step === "start" ? "正在发送…" : "正在验证…");
   try {
     if (step === "start") {
-      showNotice("正在发送验证码...");
-      const data = await api("/accounts/login/start", {
-        method: "POST",
-        body: JSON.stringify({ phone: payload.phone }),
-      });
+      const data = await api("/accounts/login/start", { method: "POST", body: JSON.stringify({ phone: payload.phone }) });
       if (data.already_exists) {
         showNotice(data.message, "ok");
-        await loadBootstrap();
-        switchView("accounts");
-        await loadAccountDetail(data.account.id);
+        await loadBootstrap({ quiet: true });
+        await openAccountDetail(data.account.id);
         return;
       }
       form.elements.login_id.value = data.login_id;
       showNotice(data.message || "验证码已发送", "ok");
+      form.elements.code.focus();
       return;
     }
-    if (!payload.login_id) {
-      showNotice("请先发送验证码。", "error");
-      return;
-    }
-    showNotice("正在确认登录...");
-    const data = await api("/accounts/login/verify", {
-      method: "POST",
-      body: JSON.stringify({
-        login_id: payload.login_id,
-        code: payload.code,
-        password: payload.password,
-      }),
-    });
+    if (!payload.login_id) throw new Error("请先发送验证码");
+    const data = await api("/accounts/login/verify", { method: "POST", body: JSON.stringify({ login_id: payload.login_id, code: payload.code, password: payload.password }) });
     if (data.needs_password) {
-      showNotice(data.message || "该账号需要 2FA 密码，请填写后再次点击确认添加。");
+      showNotice(data.message || "该账号需要 2FA 密码");
       form.elements.password.focus();
       return;
     }
     showNotice(data.message, "ok");
     form.reset();
-    await loadBootstrap();
-    switchView("accounts");
-    await loadAccountDetail(data.account.id);
+    await loadBootstrap({ quiet: true });
+    await openAccountDetail(data.account.id);
   } catch (error) {
     showNotice(`添加账号失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function submitSessionImport(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const payload = Object.fromEntries(new FormData(form).entries());
+  const button = event.submitter;
+  setBusy(button, true, "正在导入…");
   try {
-    showNotice("正在导入 Session...");
-    const data = await api("/accounts/import-session", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await api("/accounts/import-session", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
     showNotice(data.message, "ok");
     form.reset();
-    await loadBootstrap();
-    switchView("accounts");
-    await loadAccountDetail(data.account.id);
+    await loadBootstrap({ quiet: true });
+    await openAccountDetail(data.account.id);
   } catch (error) {
     showNotice(`Session 导入失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
-async function exportSessions(payload) {
+async function exportSessions(payload, button = null) {
+  setBusy(button, true, "正在导出…");
   try {
-    showNotice("正在生成 Session 导出文件...");
     const result = await downloadApi("/accounts/export-sessions", payload);
-    showNotice(`导出完成：${result.exported || 0} 个，跳过 ${result.skipped || 0} 个。`, "ok");
+    showNotice(`导出完成：${result.exported || 0} 个，跳过 ${result.skipped || 0} 个`, "ok");
   } catch (error) {
     showNotice(`Session 导出失败：${error.message}`, "error");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function submitSessionExport(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const mode = event.submitter?.dataset?.mode || "selection";
+  const button = event.submitter;
+  const mode = button?.dataset.mode || "selection";
   const raw = Object.fromEntries(new FormData(form).entries());
   if (mode === "range") {
-    if (!raw.start_id || !raw.count) {
-      showNotice("请填写起始账号 ID 和数量。", "error");
-      return;
-    }
-    await exportSessions({
-      mode: "range",
-      start_id: Number(raw.start_id),
-      count: Number(raw.count),
-    });
-    return;
+    if (!raw.start_id || !raw.count) return showNotice("请填写起始账号 ID 和数量", "error");
+    return exportSessions({ mode: "range", start_id: Number(raw.start_id), count: Number(raw.count) }, button);
   }
-  if (!raw.selection.trim()) {
-    showNotice("请填写要导出的账号 ID，例如 1,3,5-8。", "error");
-    return;
-  }
-  await exportSessions({
-    mode: "selection",
-    selection: raw.selection,
-  });
-}
-
-async function loadAccountDetail(accountId) {
-  try {
-    const data = await api(`/accounts/${accountId}`);
-    const account = data.account;
-    const detail = qs("#accountDetail");
-    const nameParts = String(account.name || "").split(" ");
-    const firstName = nameParts.shift() || "";
-    const lastName = nameParts.join(" ");
-    detail.classList.remove("hidden");
-    detail.innerHTML = `
-      <div class="panel-head">
-        <h2>账号 #${Number(account.id)}</h2>
-        <span class="status ${statusClass(account.status)}">${escapeHtml(statusLabel(account.status))}</span>
-      </div>
-      <div class="list compact">
-        <p><strong>用户名：</strong>${escapeHtml(account.username ? `@${account.username}` : "-")}</p>
-        <p><strong>姓名：</strong>${escapeHtml(account.name || "-")}</p>
-        <p><strong>Telegram ID：</strong>${escapeHtml(account.user_id || "-")}</p>
-        <p><strong>本地 Session：</strong>${account.has_active_session ? "可用" : "不可用"}</p>
-        <p><strong>2FA：</strong>${account.has_2fa ? "已启用" : "未启用/未知"}</p>
-        <p><strong>隐私快照：</strong>${escapeHtml(JSON.stringify(account.privacy || {}))}</p>
-        <p><strong>SpamBot：</strong>${escapeHtml(account.latest_spam ? statusLabel(account.latest_spam.status) : "未检测")}</p>
-      </div>
-      <div class="detail-actions">
-        <button class="text-button" type="button" data-action="reconnect">重连</button>
-        <button class="text-button" type="button" data-action="export_session">导出Session</button>
-        <button class="text-button" type="button" data-action="refresh_status">刷新检测</button>
-        <button class="text-button" type="button" data-action="spam">SpamBot</button>
-        <button class="text-button" type="button" data-action="service_check">拉取服务消息</button>
-        <button class="text-button" type="button" data-action="service_messages">查看服务消息</button>
-      </div>
-      <div class="detail-grid">
-        <form id="profileForm" class="subpanel form">
-          <h3>资料设置</h3>
-          <div class="split">
-            <label><span>First Name</span><input name="first_name" value="${escapeHtml(firstName)}" /></label>
-            <label><span>Last Name</span><input name="last_name" value="${escapeHtml(lastName)}" /></label>
-          </div>
-          <label><span>用户名</span><input name="username" value="${escapeHtml(account.username || "")}" placeholder="不用带 @" /></label>
-          <label><span>简介</span><textarea name="bio" rows="3" placeholder="留空则不修改简介"></textarea></label>
-          <button class="primary-button" type="submit">保存资料</button>
-        </form>
-
-        <form id="avatarForm" class="subpanel form">
-          <h3>头像设置</h3>
-          <label><span>上传头像</span><input name="avatar" type="file" accept="image/*" /></label>
-          <div class="split">
-            <button class="text-button" type="submit" data-mode="upload">上传设置</button>
-            <button class="text-button" type="submit" data-mode="random">随机头像</button>
-          </div>
-        </form>
-
-        <form id="privacyForm" class="subpanel form">
-          <h3>隐私设置</h3>
-          <div class="split">
-            <label>
-              <span>隐私项</span>
-              <select name="key">
-                <option value="phone">手机号</option>
-                <option value="last_seen">在线时间</option>
-                <option value="profile_photo">头像</option>
-                <option value="forwards">转发来源</option>
-                <option value="calls">通话</option>
-                <option value="groups">拉群</option>
-              </select>
-            </label>
-            <label>
-              <span>范围</span>
-              <select name="rule">
-                <option value="everybody">所有人</option>
-                <option value="contacts">联系人</option>
-                <option value="nobody">没有人</option>
-              </select>
-            </label>
-          </div>
-          <button class="primary-button" type="submit">保存隐私</button>
-        </form>
-
-        <form id="twofaForm" class="subpanel form">
-          <h3>2FA 管理</h3>
-          <label>
-            <span>操作</span>
-            <select name="action">
-              <option value="check">查询状态</option>
-              <option value="set">设置 2FA</option>
-              <option value="change">修改 2FA</option>
-              <option value="email">配置 2FA 邮箱</option>
-              <option value="disable">关闭 2FA</option>
-              <option value="confirm">确认邮箱验证码</option>
-            </select>
-          </label>
-          <div class="split">
-            <label><span>当前密码</span><input name="current_password" type="password" /></label>
-            <label><span>新密码</span><input name="new_password" type="password" /></label>
-          </div>
-          <div class="split">
-            <label><span>提示</span><input name="hint" /></label>
-            <label><span>邮箱</span><input name="email" type="email" /></label>
-          </div>
-          <label><span>邮箱验证码</span><input name="code" inputmode="numeric" /></label>
-          <button class="primary-button" type="submit">执行 2FA 操作</button>
-        </form>
-
-        <form id="loginEmailForm" class="subpanel form">
-          <h3>登录邮箱</h3>
-          <label><span>邮箱</span><input name="email" type="email" /></label>
-          <label><span>验证码</span><input name="code" inputmode="numeric" /></label>
-          <div class="split">
-            <button class="text-button" type="submit" data-action="send">发送验证码</button>
-            <button class="text-button" type="submit" data-action="confirm">确认验证码</button>
-          </div>
-        </form>
-      </div>
-      <section id="serviceMessagesPanel" class="subpanel hidden">
-        <h3>服务消息</h3>
-        <div id="serviceMessagesList" class="list compact"></div>
-      </section>
-    `;
-    qs(".detail-actions", detail).addEventListener("click", (event) => {
-      const action = event.target?.dataset?.action;
-      if (!action) return;
-      if (action === "service_messages") {
-        loadServiceMessages(accountId);
-      } else if (action === "export_session") {
-        exportSessions({ mode: "single", account_id: accountId });
-      } else {
-        runAccountAction(accountId, action);
-      }
-    });
-    qs("#profileForm", detail).addEventListener("submit", (event) => submitProfile(event, accountId));
-    qs("#avatarForm", detail).addEventListener("submit", (event) => submitAvatar(event, accountId));
-    qs("#privacyForm", detail).addEventListener("submit", (event) => submitPrivacy(event, accountId));
-    qs("#twofaForm", detail).addEventListener("submit", (event) => submitTwoFA(event, accountId));
-    qs("#loginEmailForm", detail).addEventListener("submit", (event) => submitLoginEmail(event, accountId));
-    detail.scrollIntoView({ behavior: "smooth", block: "start" });
-  } catch (error) {
-    showNotice(`详情加载失败：${error.message}`, "error");
-  }
+  if (!raw.selection.trim()) return showNotice("请填写账号 ID，例如 1,3,5-8", "error");
+  return exportSessions({ mode: "selection", selection: raw.selection }, button);
 }
 
 async function submitProfile(event, accountId) {
   event.preventDefault();
   const form = event.currentTarget;
+  const button = event.submitter;
   const raw = Object.fromEntries(new FormData(form).entries());
-  const payload = {};
-  if (raw.first_name || raw.last_name) {
-    payload.first_name = raw.first_name;
-    payload.last_name = raw.last_name;
-  }
-  if (raw.username) payload.username = raw.username;
+  const payload = { first_name: raw.first_name, last_name: raw.last_name, username: raw.username };
   if (raw.bio) payload.bio = raw.bio;
-  if (!Object.keys(payload).length) {
-    showNotice("没有需要保存的资料字段。", "error");
-    return;
-  }
+  setBusy(button, true, "正在保存…");
   try {
-    const data = await api(`/accounts/${accountId}/profile`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await api(`/accounts/${accountId}/profile`, { method: "POST", body: JSON.stringify(payload) });
     showNotice(data.message, "ok");
-    await loadBootstrap();
-    await loadAccountDetail(accountId);
+    await loadBootstrap({ quiet: true });
+    await openAccountDetail(accountId);
   } catch (error) {
     showNotice(`资料保存失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
 async function submitAvatar(event, accountId) {
   event.preventDefault();
-  const mode = event.submitter?.dataset?.mode || "upload";
   const form = event.currentTarget;
+  const button = event.submitter;
+  const mode = button?.dataset.mode || "upload";
   const formData = new FormData();
   formData.append("mode", mode);
   if (mode === "upload") {
     const file = qs("[name=avatar]", form).files[0];
-    if (!file) {
-      showNotice("请先选择头像图片。", "error");
-      return;
-    }
+    if (!file) return showNotice("请先选择头像图片", "error");
     formData.append("avatar", file);
   }
+  setBusy(button, true, "正在设置…");
   try {
-    const data = await api(`/accounts/${accountId}/avatar`, {
-      method: "POST",
-      body: formData,
-    });
+    const data = await api(`/accounts/${accountId}/avatar`, { method: "POST", body: formData });
     showNotice(data.message, "ok");
   } catch (error) {
     showNotice(`头像设置失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
 async function submitPrivacy(event, accountId) {
   event.preventDefault();
-  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  const button = event.submitter;
+  setBusy(button, true, "正在保存…");
   try {
-    const data = await api(`/accounts/${accountId}/privacy`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await api(`/accounts/${accountId}/privacy`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
     showNotice(data.message, "ok");
-    await loadAccountDetail(accountId);
+    await openAccountDetail(accountId);
   } catch (error) {
     showNotice(`隐私设置失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
 async function submitTwoFA(event, accountId) {
   event.preventDefault();
+  const button = event.submitter;
   const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
   if (payload.action === "disable" && !(await confirmAction("确认关闭该账号的 2FA？"))) return;
+  setBusy(button, true, "正在执行…");
   try {
-    const data = await api(`/accounts/${accountId}/twofa`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await api(`/accounts/${accountId}/twofa`, { method: "POST", body: JSON.stringify(payload) });
     showNotice(data.message || JSON.stringify(data.info || {}), data.needs_code ? "" : "ok");
-    if (!data.needs_code) await loadAccountDetail(accountId);
+    if (!data.needs_code) await openAccountDetail(accountId);
   } catch (error) {
     showNotice(`2FA 操作失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
 async function submitLoginEmail(event, accountId) {
   event.preventDefault();
-  const action = event.submitter?.dataset?.action || "send";
+  const button = event.submitter;
   const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-  payload.action = action;
+  payload.action = button?.dataset.action || "send";
+  setBusy(button, true, "正在处理…");
   try {
-    const data = await api(`/accounts/${accountId}/login-email`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await api(`/accounts/${accountId}/login-email`, { method: "POST", body: JSON.stringify(payload) });
     showNotice(data.message || "登录邮箱操作完成", data.needs_code ? "" : "ok");
   } catch (error) {
     showNotice(`登录邮箱操作失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
-async function loadServiceMessages(accountId) {
+async function loadServiceMessages(accountId, button) {
+  setBusy(button, true, "正在加载…");
   try {
     const data = await api(`/accounts/${accountId}/service-messages?limit=20`);
-    const panel = qs("#serviceMessagesPanel");
     const list = qs("#serviceMessagesList");
-    panel.classList.remove("hidden");
-    list.replaceChildren(
-      ...data.messages.map((message) => {
-        const row = document.createElement("article");
-        row.className = "account-row";
-        const title = document.createElement("div");
-        title.className = "row-title";
-        title.textContent = `来源 ${message.source_user_id || "-"} / 消息 #${message.message_id}`;
-        const meta = document.createElement("div");
-        meta.className = "row-meta";
-        meta.textContent = message.received_at;
-        const body = document.createElement("p");
-        body.className = "message-body";
-        body.textContent = message.text || message.text_preview || "";
-        row.append(title, meta, body);
-        return row;
-      })
-    );
-    if (!data.messages.length) {
-      list.innerHTML = '<p class="muted">暂无服务消息</p>';
-    }
+    list.replaceChildren(...data.messages.map((message) => {
+      const row = document.createElement("article");
+      row.className = "account-row";
+      const title = document.createElement("div");
+      title.className = "row-title";
+      title.textContent = `来源 ${message.source_user_id || "—"} · 消息 #${message.message_id}`;
+      const meta = document.createElement("div");
+      meta.className = "row-meta";
+      meta.textContent = formatTime(message.received_at);
+      const body = document.createElement("p");
+      body.className = "message-body";
+      body.textContent = message.text || message.text_preview || "";
+      row.append(title, meta, body);
+      return row;
+    }));
+    if (!data.messages.length) list.innerHTML = '<div class="empty-state">暂无服务消息</div>';
   } catch (error) {
     showNotice(`服务消息加载失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
-async function runAccountAction(accountId, action) {
-  showNotice("正在执行账号操作...");
+async function runAccountAction(accountId, action, button) {
+  setBusy(button, true, "正在执行…");
   try {
-    const data = await api(`/accounts/${accountId}/action`, {
-      method: "POST",
-      body: JSON.stringify({ action }),
-    });
+    const data = await api(`/accounts/${accountId}/action`, { method: "POST", body: JSON.stringify({ action }) });
     showNotice(data.message || "操作完成", "ok");
-    await loadBootstrap();
+    await loadBootstrap({ quiet: true });
+    await openAccountDetail(accountId);
   } catch (error) {
     showNotice(`操作失败：${error.message}`, "error");
-  }
+  } finally { setBusy(button, false); }
 }
 
 async function removeTarget(targetRef) {
   if (!(await confirmAction(`确认删除授权目标 ${targetRef}？`))) return;
-  showNotice("正在删除授权目标...");
   try {
-    const data = await api("/targets", {
-      method: "POST",
-      body: JSON.stringify({ action: "remove", target_ref: targetRef }),
-    });
+    const data = await api("/targets", { method: "POST", body: JSON.stringify({ action: "remove", target_ref: targetRef }) });
     showNotice(data.message, "ok");
-    await loadBootstrap();
-  } catch (error) {
-    showNotice(`删除失败：${error.message}`, "error");
-  }
+    await loadBootstrap({ quiet: true });
+  } catch (error) { showNotice(`删除失败：${error.message}`, "error"); }
 }
 
 function batchFieldMode() {
   const type = qs("#batchForm [name=type]").value;
-  qsa(".message-fields").forEach((node) =>
-    node.classList.toggle("hidden", !["react", "unreact", "view_post", "forward"].includes(type))
-  );
+  qsa(".message-fields").forEach((node) => node.classList.toggle("hidden", !["react", "unreact", "view_post", "forward"].includes(type)));
   qsa(".react-only").forEach((node) => node.classList.toggle("hidden", type !== "react"));
   qsa(".forward-only").forEach((node) => node.classList.toggle("hidden", type !== "forward"));
   qsa(".text-only").forEach((node) => node.classList.toggle("hidden", type !== "send"));
@@ -708,73 +689,61 @@ function batchFieldMode() {
 
 async function submitBatch(event) {
   event.preventDefault();
-  const form = event.currentTarget;
-  const data = Object.fromEntries(new FormData(form).entries());
-  const payload = {
-    ...data,
-    account_mode: "range",
-    start_id: Number(data.start_id),
-    count: Number(data.count),
-    message_id: data.message_id ? Number(data.message_id) : undefined,
-  };
-  showNotice("正在运行批量任务，请保持页面打开...");
+  const button = event.submitter;
+  const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+  const payload = { ...data, account_mode: "range", start_id: Number(data.start_id), count: Number(data.count), message_id: data.message_id ? Number(data.message_id) : undefined };
+  setBusy(button, true, "任务运行中…");
   try {
-    const result = await api("/batch/run", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const result = await api("/batch/run", { method: "POST", body: JSON.stringify(payload) });
     showNotice(result.message, "ok");
-    await loadBootstrap();
-  } catch (error) {
-    showNotice(`批量任务失败：${error.message}`, "error");
-  }
+    await loadBootstrap({ quiet: true });
+    await loadJobs();
+  } catch (error) { showNotice(`批量任务失败：${error.message}`, "error"); }
+  finally { setBusy(button, false); }
 }
 
 async function submitTarget(event) {
   event.preventDefault();
+  const button = event.submitter;
   const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
   payload.action = "add";
+  setBusy(button, true, "添加中…");
   try {
-    const result = await api("/targets", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const result = await api("/targets", { method: "POST", body: JSON.stringify(payload) });
     showNotice(result.message, "ok");
     event.currentTarget.reset();
-    qs("#targetForm [name=target_type]").value = "channel";
-    await loadBootstrap();
-  } catch (error) {
-    showNotice(`添加失败：${error.message}`, "error");
-  }
+    await loadBootstrap({ quiet: true });
+  } catch (error) { showNotice(`添加失败：${error.message}`, "error"); }
+  finally { setBusy(button, false); }
 }
 
 async function submitRate(event) {
   event.preventDefault();
+  const button = event.submitter;
   const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-  for (const key of ["max_actions", "per_seconds", "jitter_min", "jitter_max"]) {
-    payload[key] = Number(payload[key]);
-  }
+  ["max_actions", "per_seconds", "jitter_min", "jitter_max"].forEach((key) => { payload[key] = Number(payload[key]); });
+  setBusy(button, true, "保存中…");
   try {
-    const result = await api("/rates", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const result = await api("/rates", { method: "POST", body: JSON.stringify(payload) });
     showNotice(result.message, "ok");
-    await loadBootstrap();
-  } catch (error) {
-    showNotice(`保存失败：${error.message}`, "error");
-  }
+    await loadBootstrap({ quiet: true });
+  } catch (error) { showNotice(`保存失败：${error.message}`, "error"); }
+  finally { setBusy(button, false); }
 }
 
 qsa(".tab").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-qsa("[data-view-jump]").forEach((button) =>
-  button.addEventListener("click", () => switchView(button.dataset.viewJump))
-);
-qs("#refreshBtn").addEventListener("click", loadBootstrap);
+qsa(".segment").forEach((button) => button.addEventListener("click", () => switchActionPane(button.dataset.actionPane)));
+qsa("[data-view-jump]").forEach((button) => button.addEventListener("click", () => {
+  switchView(button.dataset.viewJump);
+  if (button.dataset.actionPane) switchActionPane(button.dataset.actionPane);
+}));
+qs("#refreshBtn").addEventListener("click", () => loadBootstrap());
+qs("#securityCheckBtn").addEventListener("click", runSecurityCheck);
+qs("#monitorToggleBtn").addEventListener("click", toggleMonitor);
+qs("#reloadJobsBtn").addEventListener("click", loadJobs);
 qs("#searchBtn").addEventListener("click", searchAccounts);
-qs("#accountSearch").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") searchAccounts();
-});
+qs("#accountSearch").addEventListener("input", (event) => { if (!event.currentTarget.value) renderAccounts(state.bootstrap?.accounts || []); });
+qs("#accountSearch").addEventListener("keydown", (event) => { if (event.key === "Enter") searchAccounts(); });
 qs("#batchForm").addEventListener("submit", submitBatch);
 qs("#batchForm [name=type]").addEventListener("change", batchFieldMode);
 qs("#phoneLoginForm").addEventListener("submit", submitPhoneLogin);
@@ -782,7 +751,16 @@ qs("#sessionImportForm").addEventListener("submit", submitSessionImport);
 qs("#sessionExportForm").addEventListener("submit", submitSessionExport);
 qs("#targetForm").addEventListener("submit", submitTarget);
 qs("#rateForm").addEventListener("submit", submitRate);
-qs("#reloadTargetsBtn").addEventListener("click", loadBootstrap);
+qs("#reloadTargetsBtn").addEventListener("click", () => loadBootstrap());
+
+if (tg) {
+  tg.ready();
+  tg.expand();
+  tg.BackButton?.onClick(() => {
+    if (state.activeAccountId) closeAccountDetail();
+    else switchView("dashboard");
+  });
+}
 
 batchFieldMode();
 loadBootstrap();

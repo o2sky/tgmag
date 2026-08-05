@@ -3,231 +3,186 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Telegram 账号面板</title>
-    <link rel="stylesheet" href="/mini-app/static/styles.css?v=20260805-1745" />
+    <meta name="color-scheme" content="light dark" />
+    <title>TGMAG 控制台</title>
+    <link rel="stylesheet" href="/mini-app/static/styles.css?v=20260805-2200" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
   </head>
   <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Telegram Panel</p>
-          <h1>账号管理</h1>
+    <div class="app-layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">T</span>
+          <div><strong>TGMAG</strong><small>安全控制台</small></div>
         </div>
-        <button id="refreshBtn" class="icon-button" type="button" title="刷新">↻</button>
-      </header>
+        <nav class="nav-list" aria-label="主导航">
+          <button class="tab active" type="button" data-view="dashboard"><span>⌂</span>概览</button>
+          <button class="tab" type="button" data-view="accounts"><span>◎</span>账号</button>
+          <button class="tab" type="button" data-view="actions"><span>＋</span>操作</button>
+          <button class="tab" type="button" data-view="settings"><span>⚙</span>设置</button>
+        </nav>
+        <div class="sidebar-foot"><span class="live-dot"></span><span id="sidebarStatus">正在连接</span></div>
+      </aside>
 
-      <nav class="tabs" aria-label="主导航">
-        <button class="tab active" type="button" data-view="dashboard">概览</button>
-        <button class="tab" type="button" data-view="accounts">账号</button>
-        <button class="tab" type="button" data-view="add">添加</button>
-        <button class="tab" type="button" data-view="batch">批量</button>
-        <button class="tab" type="button" data-view="settings">设置</button>
+      <main class="shell">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="pageEyebrow">CONTROL CENTER</p>
+            <h1 id="pageTitle">运行概览</h1>
+          </div>
+          <button id="refreshBtn" class="icon-button" type="button" aria-label="刷新数据" title="刷新数据">↻</button>
+        </header>
+
+        <section id="notice" class="notice hidden" role="status" aria-live="polite"></section>
+
+        <section id="dashboardView" class="view active">
+          <section class="health-hero panel">
+            <div class="health-copy">
+              <div id="healthIcon" class="health-icon idle">◇</div>
+              <div>
+                <p class="section-kicker">安全防护中心</p>
+                <h2 id="healthTitle">等待完整检测</h2>
+                <p id="healthDescription" class="muted">点击检测后会逐项验证数据库、邮箱、监听和账号连接，不以配置项代替真实结果。</p>
+              </div>
+            </div>
+            <div class="hero-actions">
+              <button id="securityCheckBtn" class="primary-button" type="button">运行完整检测</button>
+              <button id="monitorToggleBtn" class="secondary-button" type="button">管理监听</button>
+            </div>
+            <div id="healthChecks" class="health-checks hidden"></div>
+          </section>
+
+          <div class="metrics">
+            <article class="metric"><span>账号总数</span><strong id="metricAccounts">—</strong><small id="metricUsable">— 个 active</small></article>
+            <article class="metric"><span>当前连接</span><strong id="metricConnected">—</strong><small id="connectedHint">等待加载</small></article>
+            <article class="metric"><span>实时监听</span><strong id="metricMonitor">—</strong><small id="monitorHint">等待加载</small></article>
+            <article class="metric"><span>运行任务</span><strong id="metricJobs">—</strong><small>后台批量任务</small></article>
+          </div>
+
+          <section class="quick-grid">
+            <button class="quick-card" type="button" data-view-jump="actions" data-action-pane="phone">
+              <span class="quick-icon blue">＋</span><span><strong>添加账号</strong><small>手机号验证或导入 Session</small></span><b>›</b>
+            </button>
+            <button class="quick-card" type="button" data-view-jump="accounts">
+              <span class="quick-icon violet">◎</span><span><strong>管理账号</strong><small>状态、资料与安全设置</small></span><b>›</b>
+            </button>
+            <button class="quick-card" type="button" data-view-jump="actions" data-action-pane="batch">
+              <span class="quick-icon green">↯</span><span><strong>批量任务</strong><small>发送、关注、反应和转发</small></span><b>›</b>
+            </button>
+          </section>
+
+          <div class="dashboard-grid">
+            <section class="panel">
+              <div class="panel-head"><div><p class="section-kicker">ACCOUNTS</p><h2>最近账号</h2></div><button class="link-button" type="button" data-view-jump="accounts">查看全部</button></div>
+              <div id="recentAccounts" class="list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><p class="section-kicker">ACTIVITY</p><h2>最近任务</h2></div><button id="reloadJobsBtn" class="link-button" type="button">刷新</button></div>
+              <div id="jobsList" class="list"><div class="empty-state">暂无任务记录</div></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="accountsView" class="view">
+          <div id="accountBrowser">
+            <div class="searchbar">
+              <span>⌕</span><input id="accountSearch" type="search" placeholder="搜索 ID、手机号或用户名" autocomplete="off" />
+              <button id="searchBtn" class="secondary-button" type="button">搜索</button>
+            </div>
+            <div class="section-toolbar">
+              <p id="accountCount" class="muted">账号列表</p>
+              <button class="link-button" type="button" data-view-jump="actions" data-action-pane="export">导出 Session</button>
+            </div>
+            <div id="accountsList" class="account-grid"></div>
+          </div>
+          <section id="accountDetail" class="detail-page hidden"></section>
+        </section>
+
+        <section id="actionsView" class="view">
+          <div class="segmented" role="tablist" aria-label="操作类型">
+            <button class="segment active" type="button" data-action-pane="phone">手机号添加</button>
+            <button class="segment" type="button" data-action-pane="session">导入 Session</button>
+            <button class="segment" type="button" data-action-pane="batch">批量任务</button>
+            <button class="segment" type="button" data-action-pane="export">导出</button>
+          </div>
+
+          <section class="action-pane active" data-pane="phone">
+            <div class="form-layout">
+              <div class="form-intro"><span class="intro-icon">01</span><h2>手机号登录</h2><p>先发送验证码，再填写 Telegram 验证码。开启 2FA 的账号还需填写密码。</p></div>
+              <form id="phoneLoginForm" class="panel form">
+                <label><span>手机号</span><input name="phone" placeholder="+8613800000000" autocomplete="tel" /></label>
+                <input name="login_id" type="hidden" />
+                <div class="split"><label><span>验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><label><span>2FA 密码</span><input name="password" type="password" autocomplete="current-password" /></label></div>
+                <div class="button-row"><button class="secondary-button" type="submit" data-step="start">发送验证码</button><button class="primary-button" type="submit" data-step="verify">确认添加</button></div>
+              </form>
+            </div>
+          </section>
+
+          <section class="action-pane" data-pane="session">
+            <div class="form-layout">
+              <div class="form-intro"><span class="intro-icon">02</span><h2>导入 StringSession</h2><p>StringSession 等同于登录凭证。只在可信设备操作，导入后不要发送给任何人。</p></div>
+              <form id="sessionImportForm" class="panel form">
+                <label><span>手机号</span><input name="phone" placeholder="+8613800000000" /></label>
+                <label><span>Telethon StringSession</span><textarea name="session" rows="6" placeholder="粘贴 StringSession"></textarea></label>
+                <button class="primary-button" type="submit">安全导入</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="action-pane" data-pane="batch">
+            <div class="form-layout">
+              <div class="form-intro"><span class="intro-icon">03</span><h2>批量任务</h2><p>目标必须先加入授权列表。任务会按设置中的频率执行并记录结果。</p></div>
+              <form id="batchForm" class="panel form">
+                <label><span>任务类型</span><select name="type"><option value="send">发送消息</option><option value="subscribe">关注频道/群</option><option value="react">添加反应</option><option value="unreact">取消反应</option><option value="view_post">浏览帖子</option><option value="forward">转发消息</option></select></label>
+                <div class="split"><label><span>起始账号 ID</span><input name="start_id" inputmode="numeric" value="1" /></label><label><span>账号数量</span><input name="count" inputmode="numeric" value="1" /></label></div>
+                <label><span>目标</span><input name="target" placeholder="@your_channel 或 ID" /></label>
+                <label class="forward-only hidden"><span>源目标</span><input name="source" placeholder="@source_channel 或 ID" /></label>
+                <label class="text-only"><span>消息文本</span><textarea name="text" rows="4" placeholder="要发送的内容"></textarea></label>
+                <div class="split message-fields hidden"><label><span>消息 ID</span><input name="message_id" inputmode="numeric" /></label><label class="react-only hidden"><span>Emoji</span><input name="emoji" value="👍" /></label></div>
+                <button class="primary-button" type="submit">确认运行任务</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="action-pane" data-pane="export">
+            <div class="form-layout">
+              <div class="form-intro"><span class="intro-icon">04</span><h2>导出 Session</h2><p>导出的文件可直接登录账号，请及时转移到安全位置并从下载目录删除。</p></div>
+              <form id="sessionExportForm" class="panel form">
+                <label><span>指定账号 ID</span><input name="selection" placeholder="支持 1,3,5-8" /></label>
+                <button class="primary-button" type="submit" data-mode="selection">导出指定账号</button>
+                <div class="form-divider"><span>或按连续范围</span></div>
+                <div class="split"><label><span>起始账号 ID</span><input name="start_id" inputmode="numeric" value="1" /></label><label><span>数量</span><input name="count" inputmode="numeric" value="10" /></label></div>
+                <button class="secondary-button" type="submit" data-mode="range">按范围导出 active 账号</button>
+              </form>
+            </div>
+          </section>
+        </section>
+
+        <section id="settingsView" class="view">
+          <div class="settings-grid">
+            <section class="panel">
+              <div class="panel-head"><div><p class="section-kicker">ALLOWLIST</p><h2>授权目标</h2></div><button id="reloadTargetsBtn" class="link-button" type="button">刷新</button></div>
+              <p class="muted panel-description">批量任务只能访问这里明确授权的频道或群组。</p>
+              <form id="targetForm" class="form compact-form"><select name="target_type"><option value="channel">频道</option><option value="group">群组</option><option value="user">用户</option></select><input name="target_ref" placeholder="@target 或 ID" /><input name="title" placeholder="备注名称" /><button class="secondary-button" type="submit">添加</button></form>
+              <div id="targetsList" class="list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><p class="section-kicker">RATE LIMIT</p><h2>批量速率</h2></div></div>
+              <p class="muted panel-description">保守的频率和随机等待能降低操作过快带来的风险。</p>
+              <form id="rateForm" class="form"><input type="hidden" name="scope" value="batch" /><div class="split"><label><span>窗口内动作数</span><input name="max_actions" inputmode="numeric" value="8" /></label><label><span>窗口秒数</span><input name="per_seconds" inputmode="numeric" value="60" /></label></div><div class="split"><label><span>最小随机等待</span><input name="jitter_min" inputmode="numeric" value="2" /></label><label><span>最大随机等待</span><input name="jitter_max" inputmode="numeric" value="6" /></label></div><button class="primary-button" type="submit">保存速率</button></form>
+              <div id="ratesList" class="list compact"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <nav class="bottom-nav" aria-label="主导航">
+        <button class="tab active" type="button" data-view="dashboard"><span>⌂</span><small>概览</small></button>
+        <button class="tab" type="button" data-view="accounts"><span>◎</span><small>账号</small></button>
+        <button class="tab" type="button" data-view="actions"><span>＋</span><small>操作</small></button>
+        <button class="tab" type="button" data-view="settings"><span>⚙</span><small>设置</small></button>
       </nav>
-
-      <section id="notice" class="notice hidden"></section>
-
-      <section id="dashboardView" class="view active">
-        <div class="metrics">
-          <div class="metric">
-            <span>账号</span>
-            <strong id="metricAccounts">0</strong>
-          </div>
-          <div class="metric">
-            <span>可连接</span>
-            <strong id="metricUsable">0</strong>
-          </div>
-          <div class="metric">
-            <span>已连接</span>
-            <strong id="metricConnected">0</strong>
-          </div>
-          <div class="metric">
-            <span>实时监听</span>
-            <strong id="metricMonitor">-</strong>
-          </div>
-          <div class="metric">
-            <span>运行任务</span>
-            <strong id="metricJobs">0</strong>
-          </div>
-        </div>
-        <section class="panel">
-          <div class="panel-head">
-            <h2>最近账号</h2>
-            <button class="text-button" type="button" data-view-jump="accounts">查看全部</button>
-          </div>
-          <div id="recentAccounts" class="list"></div>
-        </section>
-      </section>
-
-      <section id="accountsView" class="view">
-        <div class="toolbar">
-          <input id="accountSearch" type="search" placeholder="搜索 ID、手机号、用户名" />
-          <button id="searchBtn" class="text-button" type="button">搜索</button>
-        </div>
-        <section class="panel">
-          <h2>导出 Session</h2>
-          <form id="sessionExportForm" class="form">
-            <label>
-              <span>账号 ID</span>
-              <input name="selection" placeholder="支持 1,3,5-8" />
-            </label>
-            <div class="split">
-              <label>
-                <span>起始账号 ID</span>
-                <input name="start_id" inputmode="numeric" value="1" />
-              </label>
-              <label>
-                <span>数量</span>
-                <input name="count" inputmode="numeric" value="10" />
-              </label>
-            </div>
-            <div class="split">
-              <button class="text-button" type="submit" data-mode="selection">导出指定账号</button>
-              <button class="text-button" type="submit" data-mode="range">按范围导出 active 账号</button>
-            </div>
-          </form>
-        </section>
-        <div id="accountsList" class="list"></div>
-        <section id="accountDetail" class="panel hidden"></section>
-      </section>
-
-      <section id="addView" class="view">
-        <section class="panel">
-          <h2>手机号登录添加</h2>
-          <form id="phoneLoginForm" class="form">
-            <label>
-              <span>手机号</span>
-              <input name="phone" placeholder="+8613800000000" autocomplete="tel" />
-            </label>
-            <input name="login_id" type="hidden" />
-            <div class="split">
-              <label>
-                <span>验证码</span>
-                <input name="code" inputmode="numeric" />
-              </label>
-              <label>
-                <span>2FA 密码</span>
-                <input name="password" type="password" />
-              </label>
-            </div>
-            <div class="split">
-              <button class="text-button" type="submit" data-step="start">发送验证码</button>
-              <button class="primary-button" type="submit" data-step="verify">确认添加</button>
-            </div>
-          </form>
-        </section>
-
-        <section class="panel">
-          <h2>导入 StringSession</h2>
-          <form id="sessionImportForm" class="form">
-            <label>
-              <span>手机号</span>
-              <input name="phone" placeholder="+8613800000000" />
-            </label>
-            <label>
-              <span>Telethon StringSession</span>
-              <textarea name="session" rows="5" placeholder="粘贴 StringSession"></textarea>
-            </label>
-            <button class="primary-button" type="submit">导入账号</button>
-          </form>
-        </section>
-      </section>
-
-      <section id="batchView" class="view">
-        <form id="batchForm" class="form panel">
-          <h2>批量任务</h2>
-          <label>
-            <span>任务类型</span>
-            <select name="type">
-              <option value="send">发送消息</option>
-              <option value="subscribe">关注频道/群</option>
-              <option value="react">添加反应</option>
-              <option value="unreact">取消反应</option>
-              <option value="view_post">浏览帖子</option>
-              <option value="forward">转发消息</option>
-            </select>
-          </label>
-          <div class="split">
-            <label>
-              <span>起始账号 ID</span>
-              <input name="start_id" inputmode="numeric" value="1" />
-            </label>
-            <label>
-              <span>数量</span>
-              <input name="count" inputmode="numeric" value="1" />
-            </label>
-          </div>
-          <label>
-            <span>目标</span>
-            <input name="target" placeholder="@your_channel 或 ID" />
-          </label>
-          <label class="forward-only hidden">
-            <span>源目标</span>
-            <input name="source" placeholder="@source_channel 或 ID" />
-          </label>
-          <label class="text-only">
-            <span>文本</span>
-            <textarea name="text" rows="4" placeholder="要发送的内容"></textarea>
-          </label>
-          <div class="split message-fields hidden">
-            <label>
-              <span>消息 ID</span>
-              <input name="message_id" inputmode="numeric" />
-            </label>
-            <label class="react-only hidden">
-              <span>Emoji</span>
-              <input name="emoji" value="👍" />
-            </label>
-          </div>
-          <button class="primary-button" type="submit">运行任务</button>
-        </form>
-      </section>
-
-      <section id="settingsView" class="view">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>授权目标</h2>
-            <button id="reloadTargetsBtn" class="text-button" type="button">刷新</button>
-          </div>
-          <form id="targetForm" class="compact-form">
-            <input name="target_type" placeholder="类型" value="channel" />
-            <input name="target_ref" placeholder="@target 或 ID" />
-            <input name="title" placeholder="标题" />
-            <button class="text-button" type="submit">添加</button>
-          </form>
-          <div id="targetsList" class="list"></div>
-        </section>
-
-        <section class="panel">
-          <h2>批量速率</h2>
-          <form id="rateForm" class="form">
-            <input type="hidden" name="scope" value="batch" />
-            <div class="split">
-              <label>
-                <span>动作数</span>
-                <input name="max_actions" inputmode="numeric" value="8" />
-              </label>
-              <label>
-                <span>窗口秒数</span>
-                <input name="per_seconds" inputmode="numeric" value="60" />
-              </label>
-            </div>
-            <div class="split">
-              <label>
-                <span>随机等待最小</span>
-                <input name="jitter_min" inputmode="numeric" value="2" />
-              </label>
-              <label>
-                <span>随机等待最大</span>
-                <input name="jitter_max" inputmode="numeric" value="6" />
-              </label>
-            </div>
-            <button class="primary-button" type="submit">保存速率</button>
-          </form>
-          <div id="ratesList" class="list compact"></div>
-        </section>
-      </section>
-    </main>
-    <script src="/mini-app/static/app.js?v=20260805-1745"></script>
+    </div>
+    <script src="/mini-app/static/app.js?v=20260805-2200"></script>
   </body>
 </html>

@@ -6,7 +6,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from app.db.models import (
     Admin,
     AllowedTarget,
     Job,
+    JobItem,
     PrivacySettings,
     RateLimit,
     ServiceMessage,
@@ -42,6 +43,7 @@ from app.services.audit import audit
 from app.services.crypto import decrypt_text, encrypt_text
 from app.services.jobs import add_job_item, create_job, finish_job
 from app.services.rate_limit import RateGate, get_rate, validate_rate_values
+from app.services.security_health import SecurityHealthReport, run_security_health_check
 from app.services.targets import canonicalize_target_ref, require_allowed_target
 from app.tg import account_ops, batch_ops
 from app.tg.client_pool import ClientPool
@@ -110,12 +112,7 @@ def download_url_to_file(url: str, path: Path) -> None:
     if len(payload) > MAX_REQUEST_SIZE:
         raise ValueError("图片超过 5MB 限制")
     header = payload[:16]
-    if not (
-        header.startswith(b"\xff\xd8\xff")
-        or header.startswith(b"\x89PNG")
-        or header.startswith(b"RIFF")
-        or header.startswith(b"GIF8")
-    ):
+    if not header.startswith((b"\xff\xd8\xff", b"\x89PNG", b"RIFF", b"GIF8")):
         raise ValueError("接口返回的不是可识别图片")
     path.write_bytes(payload)
 
@@ -126,6 +123,8 @@ def account_payload(account: TgAccount) -> dict[str, Any]:
         "phone_masked": account.phone_masked,
         "user_id": account.user_id,
         "username": account.username,
+        "first_name": account.first_name,
+        "last_name": account.last_name,
         "name": " ".join(part for part in [account.first_name, account.last_name] if part) or "",
         "status": account.status,
         "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
@@ -169,10 +168,12 @@ def parse_account_selection(value: str) -> list[int]:
     return account_ids
 
 
-async def build_session_export(session: AsyncSession, account_ids: list[int]) -> tuple[str, int, list[str]]:
+async def build_session_export(
+    session: AsyncSession, account_ids: list[int]
+) -> tuple[str, int, list[str]]:
     lines = [
         "# Telethon StringSession export",
-        f"# generated_at={datetime.now(timezone.utc).isoformat()}",
+        f"# generated_at={datetime.now(UTC).isoformat()}",
         "# 警告：string_session 等同于账号登录凭证，请不要发给不可信的人。",
         "# 导入时使用 phone 和 string_session 两项。",
         "",
@@ -196,7 +197,7 @@ async def build_session_export(session: AsyncSession, account_ids: list[int]) ->
         try:
             phone = decrypt_text(account.phone_encrypted) or account.phone_masked
             session_str = decrypt_text(tg_session.session_encrypted)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - report per-account export failures
             skipped.append(f"#{account.id}: 解密失败 {exc}")
             continue
         if not session_str:
@@ -231,7 +232,7 @@ async def close_pending_login(pending: dict[str, Any] | None) -> None:
         try:
             await client.disconnect()
         except Exception:
-            pass
+            logger.debug("Pending Telegram login disconnect failed", exc_info=True)
 
 
 async def prune_pending_logins(app: web.Application, max_age_seconds: int = 600) -> None:
@@ -255,7 +256,7 @@ async def login_twofa_hint(client: Any) -> str:
     try:
         twofa_info = await account_ops.get_2fa_info(client)
         return str(twofa_info.get("hint") or "-")
-    except Exception:
+    except Exception:  # noqa: BLE001 - a missing hint must not block a login flow
         return "-"
 
 
@@ -279,12 +280,20 @@ async def api_bootstrap(request: web.Request) -> web.Response:
     async with sessionmaker() as session:
         total = await session.scalar(select(func.count()).select_from(TgAccount))
         usable = await session.scalar(
-            select(func.count(func.distinct(TgSession.account_id))).where(TgSession.is_active.is_(True))
+            select(func.count(func.distinct(TgSession.account_id))).where(
+                TgSession.is_active.is_(True)
+            )
         )
-        accounts = list((await session.scalars(select(TgAccount).order_by(TgAccount.id).limit(50))).all())
-        targets = list((await session.scalars(select(AllowedTarget).order_by(AllowedTarget.id))).all())
+        accounts = list(
+            (await session.scalars(select(TgAccount).order_by(TgAccount.id).limit(50))).all()
+        )
+        targets = list(
+            (await session.scalars(select(AllowedTarget).order_by(AllowedTarget.id))).all()
+        )
         rates = list((await session.scalars(select(RateLimit).order_by(RateLimit.scope))).all())
-        running_jobs = await session.scalar(select(func.count()).select_from(Job).where(Job.status == "running"))
+        running_jobs = await session.scalar(
+            select(func.count()).select_from(Job).where(Job.status == "running")
+        )
     return web.json_response(
         {
             "user": {
@@ -298,8 +307,9 @@ async def api_bootstrap(request: web.Request) -> web.Response:
                 "usable": usable or 0,
                 "connected": len(client_pool.connected_account_ids),
                 "monitor_enabled": client_pool.monitor_enabled,
+                "monitor_running": client_pool.service_monitor_running,
                 "running_jobs": running_jobs or 0,
-                "server_time": datetime.now(timezone.utc).isoformat(),
+                "server_time": datetime.now(UTC).isoformat(),
             },
             "accounts": [account_payload(account) for account in accounts],
             "targets": [
@@ -324,6 +334,102 @@ async def api_bootstrap(request: web.Request) -> web.Response:
             ],
         }
     )
+
+
+def security_health_payload(report: SecurityHealthReport) -> dict[str, Any]:
+    failed = sum(check.status == "fail" for check in report.checks)
+    warnings = sum(check.status == "warn" for check in report.checks)
+    return {
+        "available": report.available,
+        "summary": (
+            "安全防护链路可用"
+            if report.available
+            else f"安全防护链路不可用：{failed} 项失败，{warnings} 项待验证"
+        ),
+        "checked_at": report.checked_at.isoformat(),
+        "checks": [
+            {
+                "name": check.name,
+                "status": check.status,
+                "detail": check.detail,
+                "fix": check.fix,
+            }
+            for check in report.checks
+        ],
+    }
+
+
+async def api_security_health(request: web.Request) -> web.Response:
+    """Run the real, non-destructive protection dependency checks on demand."""
+    await authenticated(request)
+    sessionmaker = request.app["sessionmaker"]
+    client_pool: ClientPool = request.app["client_pool"]
+    async with sessionmaker() as session:
+        report = await run_security_health_check(session, client_pool)
+    return web.json_response(security_health_payload(report))
+
+
+async def api_monitor_update(request: web.Request) -> web.Response:
+    user = await authenticated(request)
+    sessionmaker = request.app["sessionmaker"]
+    client_pool: ClientPool = request.app["client_pool"]
+    data = await request.json()
+    action = str(data.get("action") or "").strip().lower()
+    if action == "on":
+        await client_pool.start_service_monitor()
+        message = "实时监听已开启"
+    elif action == "off":
+        await client_pool.stop_service_monitor()
+        message = "实时监听已关闭，所有账号连接已断开"
+    else:
+        raise web.HTTPBadRequest(text="unsupported monitor action")
+    async with sessionmaker() as session:
+        admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))
+        await audit(session, admin, f"webapp_monitor_{action}", "monitor", action)
+        await session.commit()
+    return web.json_response(
+        {
+            "ok": True,
+            "message": message,
+            "monitor_enabled": client_pool.monitor_enabled,
+            "monitor_running": client_pool.service_monitor_running,
+            "connected": len(client_pool.connected_account_ids),
+        }
+    )
+
+
+async def api_jobs(request: web.Request) -> web.Response:
+    await authenticated(request)
+    sessionmaker = request.app["sessionmaker"]
+    try:
+        limit = min(max(int(request.query.get("limit", "8")), 1), 30)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="limit must be an integer") from exc
+    async with sessionmaker() as session:
+        jobs = list((await session.scalars(select(Job).order_by(Job.id.desc()).limit(limit))).all())
+        payload = []
+        for job in jobs:
+            counts = dict(
+                (
+                    await session.execute(
+                        select(JobItem.status, func.count())
+                        .where(JobItem.job_id == job.id)
+                        .group_by(JobItem.status)
+                    )
+                ).all()
+            )
+            payload.append(
+                {
+                    "id": job.id,
+                    "type": job.type,
+                    "status": job.status,
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+                    "error": job.error,
+                    "items": counts,
+                }
+            )
+    return web.json_response({"jobs": payload})
 
 
 async def api_accounts(request: web.Request) -> web.Response:
@@ -358,10 +464,15 @@ async def api_login_start(request: web.Request) -> web.Response:
     async with sessionmaker() as session:
         candidates = list(
             (
-                await session.scalars(select(TgAccount).where(TgAccount.phone_masked == phone_masked))
+                await session.scalars(
+                    select(TgAccount).where(TgAccount.phone_masked == phone_masked)
+                )
             ).all()
         )
-        existing = next((account for account in candidates if decrypt_text(account.phone_encrypted) == phone), None)
+        existing = next(
+            (account for account in candidates if decrypt_text(account.phone_encrypted) == phone),
+            None,
+        )
         if existing is not None:
             active_session = await session.scalar(
                 select(TgSession.id)
@@ -455,7 +566,9 @@ async def api_login_verify(request: web.Request) -> web.Response:
                             "message": f"该账号需要 2FA 密码，请填写后再次确认。密码提示：{hint}",
                         }
                     )
-                session_str, me = await account_ops.complete_password_login(pending["client"], password)
+                session_str, me = await account_ops.complete_password_login(
+                    pending["client"], password
+                )
     except SessionPasswordNeededError:
         hint = await login_twofa_hint(pending["client"])
         pending["needs_password"] = True
@@ -478,7 +591,9 @@ async def api_login_verify(request: web.Request) -> web.Response:
     except FloodWaitError as exc:
         raise web.HTTPTooManyRequests(text=f"尝试过于频繁，需要等待 {exc.seconds} 秒") from exc
     async with sessionmaker() as session:
-        account = await account_ops.save_logged_in_account(session, pending["phone"], session_str, me, password)
+        account = await account_ops.save_logged_in_account(
+            session, pending["phone"], session_str, me, password
+        )
         admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))
         await audit(session, admin, "webapp_login_account", "account", str(account.id))
         await session.commit()
@@ -521,7 +636,9 @@ async def api_export_sessions(request: web.Request) -> web.Response:
     mode = str(data.get("mode") or "selection").strip()
     async with sessionmaker() as session:
         if mode == "range":
-            account_ids = await active_ids_from_range(session, int(data["start_id"]), int(data["count"]))
+            account_ids = await active_ids_from_range(
+                session, int(data["start_id"]), int(data["count"])
+            )
         elif mode == "single":
             account_ids = [int(data["account_id"])]
         elif mode == "ids":
@@ -547,9 +664,9 @@ async def api_export_sessions(request: web.Request) -> web.Response:
     if exported == 0:
         raise web.HTTPBadRequest(text="没有可导出的 active session")
     filename = (
-        f"tg_session_{account_ids[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        f"tg_session_{account_ids[0]}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.txt"
         if len(account_ids) == 1
-        else f"tg_sessions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        else f"tg_sessions_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.txt"
     )
     return web.Response(
         body=content.encode("utf-8"),
@@ -641,7 +758,9 @@ async def api_account_action(request: web.Request) -> web.Response:
         async with sessionmaker() as session:
             service_inserted = await account_ops.service_check(session, account_id, client)
         await client_pool.catch_up_recent_login_alerts(account_id, client)
-        return web.json_response({"ok": True, "message": f"Telegram 777000 服务消息检查完成：新增 {service_inserted} 条"})
+        return web.json_response(
+            {"ok": True, "message": f"Telegram 777000 服务消息检查完成：新增 {service_inserted} 条"}
+        )
     if action == "refresh_status":
         client = await client_pool.get_client(account_id)
         async with sessionmaker() as session:
@@ -650,7 +769,9 @@ async def api_account_action(request: web.Request) -> web.Response:
                 raise web.HTTPNotFound(text="account not found")
             await account_ops.sync_me(session, account, client)
             twofa_info = await account_ops.get_2fa_info(client)
-            await account_ops.update_security_snapshot(session, account_id, bool(twofa_info.get("has_2fa")))
+            await account_ops.update_security_snapshot(
+                session, account_id, bool(twofa_info.get("has_2fa"))
+            )
             spam_record = await account_ops.spam_check(session, account_id, client)
             service_inserted = await account_ops.service_check(session, account_id, client)
         await client_pool.catch_up_recent_login_alerts(account_id, client)
@@ -717,7 +838,9 @@ async def api_account_avatar_update(request: web.Request) -> web.Response:
                 raise web.HTTPBadRequest(text="avatar file required")
             filename = getattr(file_field, "filename", "") or "avatar.jpg"
             suffix = Path(filename).suffix or ".jpg"
-            with tempfile.NamedTemporaryFile(prefix="tg_web_avatar_", suffix=suffix, delete=False) as tmp:
+            with tempfile.NamedTemporaryFile(
+                prefix="tg_web_avatar_", suffix=suffix, delete=False
+            ) as tmp:
                 temp_path = Path(tmp.name)
                 payload = file_field.file.read(MAX_REQUEST_SIZE + 1)
                 if len(payload) > MAX_REQUEST_SIZE:
@@ -730,13 +853,16 @@ async def api_account_avatar_update(request: web.Request) -> web.Response:
         elif mode == "random":
             last_error = None
             for url in RANDOM_AVATAR_URLS:
-                candidate = Path(tempfile.gettempdir()) / f"tg_web_random_avatar_{account_id}_{int(datetime.now().timestamp())}.jpg"
+                candidate = (
+                    Path(tempfile.gettempdir())
+                    / f"tg_web_random_avatar_{account_id}_{int(datetime.now(UTC).timestamp())}.jpg"
+                )
                 try:
                     await asyncio.to_thread(download_url_to_file, url, candidate)
                     temp_path = candidate
                     source = url
                     break
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - retry every trusted avatar source
                     last_error = exc
                     if candidate.exists():
                         candidate.unlink(missing_ok=True)
@@ -747,7 +873,14 @@ async def api_account_avatar_update(request: web.Request) -> web.Response:
         await account_ops.set_avatar(client, str(temp_path))
         async with sessionmaker() as session:
             admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))
-            await audit(session, admin, "webapp_avatar_update", "account", str(account_id), {"mode": mode, "source": source})
+            await audit(
+                session,
+                admin,
+                "webapp_avatar_update",
+                "account",
+                str(account_id),
+                {"mode": mode, "source": source},
+            )
             await session.commit()
     finally:
         if mode in {"upload", "random"} and temp_path is not None and temp_path.exists():
@@ -787,7 +920,9 @@ async def api_account_twofa(request: web.Request) -> web.Response:
     if action == "check":
         info = await account_ops.get_2fa_info(client)
         async with sessionmaker() as session:
-            await account_ops.update_security_snapshot(session, account_id, bool(info.get("has_2fa")))
+            await account_ops.update_security_snapshot(
+                session, account_id, bool(info.get("has_2fa"))
+            )
         return web.json_response({"ok": True, "info": info})
     if action == "confirm":
         code = str(data.get("code") or "").strip()
@@ -821,19 +956,30 @@ async def api_account_twofa(request: web.Request) -> web.Response:
         if action == "set":
             if not new_password:
                 raise web.HTTPBadRequest(text="new_password required")
-            await account_ops.edit_2fa(client, None, new_password, hint, email, require_email_code if email else None)
+            await account_ops.edit_2fa(
+                client, None, new_password, hint, email, require_email_code if email else None
+            )
             snapshot_password = new_password
             snapshot_enabled = True
         elif action == "change":
             if not current_password or not new_password:
                 raise web.HTTPBadRequest(text="current_password and new_password required")
-            await account_ops.edit_2fa(client, current_password, new_password, hint, email, require_email_code if email else None)
+            await account_ops.edit_2fa(
+                client,
+                current_password,
+                new_password,
+                hint,
+                email,
+                require_email_code if email else None,
+            )
             snapshot_password = new_password
             snapshot_enabled = True
         elif action == "email":
             if not current_password or not email:
                 raise web.HTTPBadRequest(text="current_password and email required")
-            await account_ops.edit_2fa(client, current_password, current_password, hint, email, require_email_code)
+            await account_ops.edit_2fa(
+                client, current_password, current_password, hint, email, require_email_code
+            )
             snapshot_password = current_password
             snapshot_enabled = True
         elif action == "disable":
@@ -851,11 +997,18 @@ async def api_account_twofa(request: web.Request) -> web.Response:
             "email": email,
         }
         return web.json_response(
-            {"ok": True, "needs_code": True, "length": exc.code_length, "message": "验证码已发送到 2FA 邮箱"}
+            {
+                "ok": True,
+                "needs_code": True,
+                "length": exc.code_length,
+                "message": "验证码已发送到 2FA 邮箱",
+            }
         )
     async with sessionmaker() as session:
         admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))
-        await account_ops.update_security_snapshot(session, account_id, snapshot_enabled, snapshot_password, hint, email)
+        await account_ops.update_security_snapshot(
+            session, account_id, snapshot_enabled, snapshot_password, hint, email
+        )
         await audit(session, admin, f"webapp_twofa_{action}", "account", str(account_id))
         await session.commit()
     return web.json_response({"ok": True, "message": "2FA 操作完成"})
@@ -878,7 +1031,9 @@ async def api_account_login_email(request: web.Request) -> web.Response:
         except Exception as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         request.app["pending_login_email"][account_flow_key(user.id, account_id)] = email
-        return web.json_response({"ok": True, "needs_code": True, **sent, "message": "登录邮箱验证码已发送"})
+        return web.json_response(
+            {"ok": True, "needs_code": True, **sent, "message": "登录邮箱验证码已发送"}
+        )
     if action == "confirm":
         code = str(data.get("code") or "").strip()
         pending_key = account_flow_key(user.id, account_id)
@@ -897,7 +1052,14 @@ async def api_account_login_email(request: web.Request) -> web.Response:
                 session.add(security)
             if email:
                 security.login_email_encrypted = encrypt_text(email)
-            await audit(session, admin, "webapp_login_email_confirm", "account", str(account_id), {"email": email})
+            await audit(
+                session,
+                admin,
+                "webapp_login_email_confirm",
+                "account",
+                str(account_id),
+                {"email": email},
+            )
             await session.commit()
         return web.json_response({"ok": True, "message": "登录邮箱已确认"})
     raise web.HTTPBadRequest(text="unsupported login email action")
@@ -998,7 +1160,9 @@ async def api_targets_update(request: web.Request) -> web.Response:
                 target_ref = canonicalize_target_ref(str(data.get("target_ref") or ""))
             except ValueError as exc:
                 raise web.HTTPBadRequest(text=str(exc)) from exc
-            await session.execute(delete(AllowedTarget).where(AllowedTarget.target_ref == target_ref))
+            await session.execute(
+                delete(AllowedTarget).where(AllowedTarget.target_ref == target_ref)
+            )
             await audit(session, admin, "webapp_target_remove", "target", target_ref)
             await session.commit()
             return web.json_response({"ok": True, "message": "授权目标已删除"})
@@ -1112,7 +1276,9 @@ async def api_batch_run(request: web.Request) -> web.Response:
             f"webapp_{job_type}",
             {"target": target_ref, "accounts": account_ids, "payload": data},
         )
-        await audit(session, admin, f"webapp_{job_type}", "target", target_ref, {"accounts": account_ids})
+        await audit(
+            session, admin, f"webapp_{job_type}", "target", target_ref, {"accounts": account_ids}
+        )
         await session.commit()
         job_id = job.id
 
@@ -1126,11 +1292,15 @@ async def api_batch_run(request: web.Request) -> web.Response:
             for account_id in account_ids:
                 await gate.wait()
                 try:
-                    result = await run_batch_call(client_pool, job_type, account_id, target_ref, data)
+                    result = await run_batch_call(
+                        client_pool, job_type, account_id, target_ref, data
+                    )
                     await add_job_item(session, job, account_id, target_ref, "ok", result=result)
                     ok += 1
-                except Exception as exc:
-                    await add_job_item(session, job, account_id, target_ref, "failed", error=str(exc))
+                except Exception as exc:  # noqa: BLE001 - one account must not abort a batch
+                    await add_job_item(
+                        session, job, account_id, target_ref, "failed", error=str(exc)
+                    )
                     failed += 1
                 await session.commit()
             await finish_job(session, job, "finished_with_errors" if failed else "finished")
@@ -1142,7 +1312,9 @@ async def api_batch_run(request: web.Request) -> web.Response:
                 await finish_job(session, job, "failed", str(exc))
                 await session.commit()
             raise
-    return web.json_response({"ok": True, "job_id": job_id, "message": f"任务完成：成功 {ok}，失败 {failed}"})
+    return web.json_response(
+        {"ok": True, "job_id": job_id, "message": f"任务完成：成功 {ok}，失败 {failed}"}
+    )
 
 
 async def run_batch_call(
@@ -1153,7 +1325,9 @@ async def run_batch_call(
     data: dict[str, Any],
 ) -> dict[str, Any]:
     if job_type == "send":
-        return await batch_ops.send_message(client_pool, account_id, target_ref, str(data.get("text") or ""))
+        return await batch_ops.send_message(
+            client_pool, account_id, target_ref, str(data.get("text") or "")
+        )
     if job_type == "subscribe":
         return await batch_ops.subscribe(client_pool, account_id, target_ref)
     if job_type == "react":
@@ -1167,7 +1341,9 @@ async def run_batch_call(
     if job_type == "unreact":
         return await batch_ops.unreact(client_pool, account_id, target_ref, int(data["message_id"]))
     if job_type == "view_post":
-        return await batch_ops.view_post(client_pool, account_id, target_ref, int(data["message_id"]))
+        return await batch_ops.view_post(
+            client_pool, account_id, target_ref, int(data["message_id"])
+        )
     if job_type == "forward":
         return await batch_ops.forward(
             client_pool,
@@ -1197,6 +1373,9 @@ async def create_webapp(
     app.router.add_get("/mini-app/", index)
     app.router.add_static("/mini-app/static", STATIC_DIR)
     app.router.add_get("/mini-app/api/bootstrap", api_bootstrap)
+    app.router.add_get("/mini-app/api/security-health", api_security_health)
+    app.router.add_post("/mini-app/api/monitor", api_monitor_update)
+    app.router.add_get("/mini-app/api/jobs", api_jobs)
     app.router.add_get("/mini-app/api/accounts", api_accounts)
     app.router.add_post("/mini-app/api/accounts/login/start", api_login_start)
     app.router.add_post("/mini-app/api/accounts/login/verify", api_login_verify)
@@ -1204,12 +1383,22 @@ async def create_webapp(
     app.router.add_post("/mini-app/api/accounts/export-sessions", api_export_sessions)
     app.router.add_get("/mini-app/api/accounts/{account_id:\\d+}", api_account_detail)
     app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/action", api_account_action)
-    app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/profile", api_account_profile_update)
-    app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/avatar", api_account_avatar_update)
-    app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/privacy", api_account_privacy_update)
+    app.router.add_post(
+        "/mini-app/api/accounts/{account_id:\\d+}/profile", api_account_profile_update
+    )
+    app.router.add_post(
+        "/mini-app/api/accounts/{account_id:\\d+}/avatar", api_account_avatar_update
+    )
+    app.router.add_post(
+        "/mini-app/api/accounts/{account_id:\\d+}/privacy", api_account_privacy_update
+    )
     app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/twofa", api_account_twofa)
-    app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/login-email", api_account_login_email)
-    app.router.add_get("/mini-app/api/accounts/{account_id:\\d+}/service-messages", api_account_service_messages)
+    app.router.add_post(
+        "/mini-app/api/accounts/{account_id:\\d+}/login-email", api_account_login_email
+    )
+    app.router.add_get(
+        "/mini-app/api/accounts/{account_id:\\d+}/service-messages", api_account_service_messages
+    )
     app.router.add_get("/mini-app/api/targets", api_targets)
     app.router.add_post("/mini-app/api/targets", api_targets_update)
     app.router.add_get("/mini-app/api/rates", api_rates)

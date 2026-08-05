@@ -262,7 +262,18 @@ sudo systemctl restart tg-account-bot
 curl -I https://bot.example.com/mini-app
 ```
 
-然后在 Bot 中发送 `/app`。Mini App API 会校验 Telegram `initData` 签名和管理员身份，因此直接用普通浏览器访问页面后出现未授权 API 响应是正常现象。
+### 8.1 配置机器人资料页的“打开应用”按钮
+
+聊天内的菜单按钮和机器人资料页按钮是两个不同入口。要实现类似 `@BotFather` 的效果，让用户无需先进入对话就能从资料页直接打开：
+
+1. 打开 `@BotFather`，发送 `/mybots` 并选择对应机器人。
+2. 进入 `Bot Settings` → `Configure Mini App` → `Enable Mini App`。
+3. 按提示填写上面的 `MINI_APP_PUBLIC_URL`，并上传适合手机页面的预览图。
+4. 返回机器人资料页，确认出现 `Launch app` 或“打开应用”按钮。
+
+配置完成后也可以使用 `https://t.me/<bot_username>?startapp` 直接打开主 Mini App；需要传递场景参数时使用 `?startapp=<command>`。这个资料页按钮只能通过 `@BotFather` 配置，Bot API 无法代替管理员启用它。
+
+聊天内仍可发送 `/app` 打开同一个页面。Mini App API 会校验 Telegram `initData` 签名和管理员身份，因此直接用普通浏览器访问页面后出现未授权 API 响应是正常现象。
 
 ## 9. 配置登录邮箱保护（可选）
 

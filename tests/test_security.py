@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -10,15 +11,18 @@ import pytest
 from aiohttp import web
 
 from app.config import settings
+from app.services.security_health import SecurityHealthCheck, SecurityHealthReport
 from app.webapp.auth import validate_init_data
-from app.webapp.server import error_middleware
+from app.webapp.server import error_middleware, security_health_payload
 
 
 def signed_init_data(auth_date: int) -> str:
     values = {
         "auth_date": str(auth_date),
         "query_id": "test-query",
-        "user": json.dumps({"id": settings.admin_ids[0], "first_name": "Test"}, separators=(",", ":")),
+        "user": json.dumps(
+            {"id": settings.admin_ids[0], "first_name": "Test"}, separators=(",", ":")
+        ),
     }
     check = "\n".join(f"{key}={values[key]}" for key in sorted(values))
     secret = hmac.new(b"WebAppData", settings.bot_token.encode(), hashlib.sha256).digest()
@@ -59,3 +63,19 @@ def test_mini_app_value_errors_become_bad_requests() -> None:
     with pytest.raises(web.HTTPBadRequest) as captured:
         asyncio.run(error_middleware(request, invalid_handler))
     assert captured.value.text == "invalid input"
+
+
+def test_mini_app_security_health_never_reports_partial_chain_available() -> None:
+    report = SecurityHealthReport(
+        checks=(
+            SecurityHealthCheck("数据库", "pass", "正常"),
+            SecurityHealthCheck("实时监听", "fail", "后台任务已退出", "重新开启监听"),
+        ),
+        checked_at=datetime.now(UTC),
+    )
+
+    payload = security_health_payload(report)
+
+    assert payload["available"] is False
+    assert "不可用" in payload["summary"]
+    assert payload["checks"][1]["fix"] == "重新开启监听"
