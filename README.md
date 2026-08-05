@@ -33,7 +33,7 @@
 ### 1. 克隆仓库并安装依赖
 
 ```bash
-git clone https://github.com/yuuheu/tgmag.git
+git clone https://github.com/openhomek/tgmag.git
 cd tgmag
 ./ops/install_debian12.sh
 cp .env.example .env

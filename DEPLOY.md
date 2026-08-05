@@ -44,7 +44,7 @@ sudo useradd --system --user-group \
 如果该用户已存在，可跳过 `useradd`。克隆项目并设置权限：
 
 ```bash
-sudo git clone https://github.com/yuuheu/tgmag.git /opt/tg-account-bot
+sudo git clone https://github.com/openhomek/tgmag.git /opt/tg-account-bot
 sudo chown -R tg-account-bot:tg-account-bot /opt/tg-account-bot
 cd /opt/tg-account-bot
 ```
