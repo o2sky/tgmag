@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -40,11 +40,7 @@ class ClientPool:
 
     @property
     def connected_account_ids(self) -> set[int]:
-        return {
-            account_id
-            for account_id, client in self.clients.items()
-            if client.is_connected()
-        }
+        return {account_id for account_id, client in self.clients.items() if client.is_connected()}
 
     @property
     def service_monitor_running(self) -> bool:
@@ -112,7 +108,7 @@ class ClientPool:
     async def check_login_email_health(self) -> bool:
         """Validate the configured IMAP mailbox and retain the real runtime result."""
         async with self._login_email_health_lock:
-            self.login_email_health_checked_at = datetime.now(timezone.utc)
+            self.login_email_health_checked_at = datetime.now(UTC)
             try:
                 await self.login_email_protector.reader.validate_connection()
             except Exception as exc:
@@ -157,7 +153,9 @@ class ClientPool:
             try:
                 await self.login_email_protector.retry(event_id, domain, client)
             except Exception:
-                logger.exception("Manual login email protection retry failed for event %s", event_id)
+                logger.exception(
+                    "Manual login email protection retry failed for event %s", event_id
+                )
 
         task = asyncio.create_task(run(), name=f"login-email-protection-retry-{event_id}")
         self._track_protection_task(task)
@@ -176,7 +174,9 @@ class ClientPool:
                 if not tg_session:
                     raise ValueError(f"账号 {account_id} 没有可用 session")
                 session_str = decrypt_text(tg_session.session_encrypted)
-            client = TelegramClient(StringSession(session_str), settings.tg_api_id, settings.tg_api_hash)
+            client = TelegramClient(
+                StringSession(session_str), settings.tg_api_id, settings.tg_api_hash
+            )
             try:
                 await client.connect()
                 if not await client.is_user_authorized():
@@ -200,7 +200,7 @@ class ClientPool:
             await session.execute(
                 update(TgSession)
                 .where(TgSession.account_id == account_id, TgSession.is_active.is_(True))
-                .values(is_active=False, rotated_at=datetime.now(timezone.utc))
+                .values(is_active=False, rotated_at=datetime.now(UTC))
             )
             account = await session.get(TgAccount, account_id)
             if account is not None:
@@ -214,9 +214,13 @@ class ClientPool:
         client: TelegramClient,
     ) -> None:
         catchup_seconds = settings.login_email_catchup_seconds
-        if not self.monitor_enabled or not settings.login_email_protection_enabled or not catchup_seconds:
+        if (
+            not self.monitor_enabled
+            or not settings.login_email_protection_enabled
+            or not catchup_seconds
+        ):
             return
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=catchup_seconds)
+        cutoff = datetime.now(UTC) - timedelta(seconds=catchup_seconds)
         try:
             messages = await client.get_messages(777000, limit=10)
         except Exception:
@@ -224,9 +228,9 @@ class ClientPool:
             return
         for message in reversed(messages):
             text = message.message or ""
-            received_at = message.date or datetime.now(timezone.utc)
+            received_at = message.date or datetime.now(UTC)
             if received_at.tzinfo is None:
-                received_at = received_at.replace(tzinfo=timezone.utc)
+                received_at = received_at.replace(tzinfo=UTC)
             if received_at < cutoff or not is_login_code_alert(text):
                 continue
             await self._ingest_service_message(
@@ -252,6 +256,34 @@ class ClientPool:
             name=f"login-email-protection-{account_id}-{service_message_id}",
         )
         self._track_protection_task(task)
+
+    async def _is_post_session_login_alert(
+        self,
+        account_id: int,
+        text: str,
+        received_at: datetime,
+    ) -> bool:
+        """Only protect login alerts created after the active session was admitted."""
+        if not is_login_code_alert(text):
+            return False
+        async with self.sessionmaker() as session:
+            session_created_at = await session.scalar(
+                select(TgSession.created_at)
+                .where(TgSession.account_id == account_id, TgSession.is_active.is_(True))
+                .order_by(TgSession.id.desc())
+                .limit(1)
+            )
+        if session_created_at is None:
+            logger.warning(
+                "Ignoring login alert for account %s because no active session baseline exists",
+                account_id,
+            )
+            return False
+        if received_at.tzinfo is None:
+            received_at = received_at.replace(tzinfo=UTC)
+        if session_created_at.tzinfo is None:
+            session_created_at = session_created_at.replace(tzinfo=UTC)
+        return received_at > session_created_at
 
     async def _ingest_service_message(
         self,
@@ -283,7 +315,7 @@ class ClientPool:
                         text=text,
                         text_preview=text[:1000],
                         received_at=received_at,
-                        notified_at=datetime.now(timezone.utc),
+                        notified_at=datetime.now(UTC),
                     )
                     session.add(record)
                     await session.flush()
@@ -298,9 +330,17 @@ class ClientPool:
                 await session.commit()
                 service_message_id = record.id
 
-        # Existing service rows must still reach the idempotent protector. A
-        # manual history pull may have stored the row just before the live event.
-        self._schedule_login_email_protection(account_id, service_message_id, text, client)
+        # The alert used to create/import the current Session predates that
+        # Session and is only the enrollment baseline. Protect strictly newer
+        # alerts, including existing rows saved by a manual history pull.
+        if await self._is_post_session_login_alert(account_id, text, received_at):
+            self._schedule_login_email_protection(account_id, service_message_id, text, client)
+        elif is_login_code_alert(text):
+            logger.info(
+                "Stored baseline login alert without protection for account %s, message %s",
+                account_id,
+                message_id,
+            )
         if not created:
             return
         for admin_id in settings.admin_ids:
@@ -319,7 +359,9 @@ class ClientPool:
             except Exception:
                 logger.exception("Unexpected notify failure for admin %s", admin_id)
 
-    async def _handle_service_message(self, account_id: int, event: events.NewMessage.Event) -> None:
+    async def _handle_service_message(
+        self, account_id: int, event: events.NewMessage.Event
+    ) -> None:
         if not self.monitor_enabled:
             return
         if not event.is_private:
@@ -334,7 +376,7 @@ class ClientPool:
         text = event.raw_text or ""
         if not text.strip():
             return
-        received_at = event.message.date or datetime.now(timezone.utc)
+        received_at = event.message.date or datetime.now(UTC)
         client = self.clients.get(account_id)
         if client is None:
             logger.error("Received a service message for untracked account %s", account_id)
