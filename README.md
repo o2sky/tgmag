@@ -186,11 +186,7 @@ sudo systemctl enable --now tg-account-bot
 sudo systemctl is-enabled tg-account-bot
 ```
 
-正常应输出：
-
-```text
-enabled
-```
+正常应输出：'enabled'
 
 确认当前服务正在运行：
 
@@ -198,11 +194,7 @@ enabled
 sudo systemctl is-active tg-account-bot
 ```
 
-正常应输出：
-
-```text
-active
-```
+正常应输出：'active'
 
 查看完整状态：
 
