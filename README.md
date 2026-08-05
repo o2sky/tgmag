@@ -186,7 +186,7 @@ sudo systemctl enable --now tg-account-bot
 sudo systemctl is-enabled tg-account-bot
 ```
 
-正常应输出：'enabled'
+正常应输出：`enabled`
 
 确认当前服务正在运行：
 
@@ -194,7 +194,7 @@ sudo systemctl is-enabled tg-account-bot
 sudo systemctl is-active tg-account-bot
 ```
 
-正常应输出：'active'
+正常应输出：`active`
 
 查看完整状态：
 
@@ -331,12 +331,6 @@ sudo install -m 644 ops/systemd/tg-account-bot.service \
 sudo systemctl daemon-reload
 sudo systemctl restart tg-account-bot
 ```
-
-## 完整部署文档
-
-更完整的 Debian 12、PostgreSQL、Nginx HTTPS、Mini App、Gmail 登录邮箱保护、备份恢复和故障排查说明，请查看：
-
-- [DEPLOY.md](DEPLOY.md)
 
 ## License
 
