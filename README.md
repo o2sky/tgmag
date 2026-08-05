@@ -5,6 +5,8 @@
 > [!IMPORTANT]
 > 本项目仅适用于你本人拥有或已获得明确授权的 Telegram 账号。生产环境推荐使用 **Debian 12 + PostgreSQL + systemd** 部署。
 
+完整的首次生产部署（包括创建独立用户、PostgreSQL 数据库、目录权限和 HTTPS）请按 [DEPLOY.md](DEPLOY.md) 操作；下面的快速开始主要用于本地或前台验证。
+
 ## 目录
 
 - [运行要求](#运行要求)
@@ -153,6 +155,9 @@ ops/systemd/tg-account-bot.service
 | systemd 服务名 | `tg-account-bot` |
 | 环境变量文件 | `/opt/tg-account-bot/.env` |
 | 启动命令 | `/opt/tg-account-bot/.venv/bin/python -m app.main` |
+
+> [!IMPORTANT]
+> 下方 systemd 命令不是“快速开始”的直接下一步。执行前必须先完成 [DEPLOY.md 第 2～6 节](DEPLOY.md#2-安装系统依赖和代码)：创建 `tg-account-bot` 用户，将代码部署到 `/opt/tg-account-bot`，配置权限和 `.env`，安装依赖并执行数据库迁移。否则 `/opt/tg-account-bot` 或服务用户不存在，命令会失败。
 
 安装 systemd 服务：
 
