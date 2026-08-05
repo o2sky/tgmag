@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from app.db.models import LoginEmailProtectionEvent, TgAccount
-from app.config import settings
-
 from aiogram.types import (
     ForceReply,
     InlineKeyboardButton,
@@ -13,6 +10,9 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     WebAppInfo,
 )
+
+from app.config import settings
+from app.db.models import LoginEmailProtectionEvent, TgAccount
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -49,7 +49,7 @@ def mini_app_panel() -> InlineKeyboardMarkup | None:
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="打开内置应用", web_app=WebAppInfo(url=mini_app_url))],
+            [InlineKeyboardButton(text="打开", web_app=WebAppInfo(url=mini_app_url))],
             [InlineKeyboardButton(text="返回", callback_data="nav:home")],
         ]
     )
@@ -61,7 +61,7 @@ def bot_menu_button() -> MenuButtonCommands | MenuButtonWebApp:
     if not settings.mini_app_enabled or not mini_app_url:
         return MenuButtonCommands()
     return MenuButtonWebApp(
-        text="打开内置应用",
+        text="打开",
         web_app=WebAppInfo(url=mini_app_url),
     )
 

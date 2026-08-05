@@ -54,6 +54,7 @@ def test_native_bot_menu_opens_configured_mini_app(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(settings, "mini_app_public_url", "https://bot.example/mini-app")
     payload = bot_menu_button().model_dump(exclude_none=True)
     assert payload["type"] == "web_app"
+    assert payload["text"] == "打开"
     assert payload["web_app"]["url"].endswith("/mini-app")
 
 
