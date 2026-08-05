@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Telegram 账号面板</title>
+    <link rel="stylesheet" href="/mini-app/static/styles.css?v=20260805-1745" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Telegram Panel</p>
+          <h1>账号管理</h1>
+        </div>
+        <button id="refreshBtn" class="icon-button" type="button" title="刷新">↻</button>
+      </header>
+
+      <nav class="tabs" aria-label="主导航">
+        <button class="tab active" type="button" data-view="dashboard">概览</button>
+        <button class="tab" type="button" data-view="accounts">账号</button>
+        <button class="tab" type="button" data-view="add">添加</button>
+        <button class="tab" type="button" data-view="batch">批量</button>
+        <button class="tab" type="button" data-view="settings">设置</button>
+      </nav>
+
+      <section id="notice" class="notice hidden"></section>
+
+      <section id="dashboardView" class="view active">
+        <div class="metrics">
+          <div class="metric">
+            <span>账号</span>
+            <strong id="metricAccounts">0</strong>
+          </div>
+          <div class="metric">
+            <span>可连接</span>
+            <strong id="metricUsable">0</strong>
+          </div>
+          <div class="metric">
+            <span>已连接</span>
+            <strong id="metricConnected">0</strong>
+          </div>
+          <div class="metric">
+            <span>实时监听</span>
+            <strong id="metricMonitor">-</strong>
+          </div>
+          <div class="metric">
+            <span>运行任务</span>
+            <strong id="metricJobs">0</strong>
+          </div>
+        </div>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>最近账号</h2>
+            <button class="text-button" type="button" data-view-jump="accounts">查看全部</button>
+          </div>
+          <div id="recentAccounts" class="list"></div>
+        </section>
+      </section>
+
+      <section id="accountsView" class="view">
+        <div class="toolbar">
+          <input id="accountSearch" type="search" placeholder="搜索 ID、手机号、用户名" />
+          <button id="searchBtn" class="text-button" type="button">搜索</button>
+        </div>
+        <section class="panel">
+          <h2>导出 Session</h2>
+          <form id="sessionExportForm" class="form">
+            <label>
+              <span>账号 ID</span>
+              <input name="selection" placeholder="支持 1,3,5-8" />
+            </label>
+            <div class="split">
+              <label>
+                <span>起始账号 ID</span>
+                <input name="start_id" inputmode="numeric" value="1" />
+              </label>
+              <label>
+                <span>数量</span>
+                <input name="count" inputmode="numeric" value="10" />
+              </label>
+            </div>
+            <div class="split">
+              <button class="text-button" type="submit" data-mode="selection">导出指定账号</button>
+              <button class="text-button" type="submit" data-mode="range">按范围导出 active 账号</button>
+            </div>
+          </form>
+        </section>
+        <div id="accountsList" class="list"></div>
+        <section id="accountDetail" class="panel hidden"></section>
+      </section>
+
+      <section id="addView" class="view">
+        <section class="panel">
+          <h2>手机号登录添加</h2>
+          <form id="phoneLoginForm" class="form">
+            <label>
+              <span>手机号</span>
+              <input name="phone" placeholder="+8613800000000" autocomplete="tel" />
+            </label>
+            <input name="login_id" type="hidden" />
+            <div class="split">
+              <label>
+                <span>验证码</span>
+                <input name="code" inputmode="numeric" />
+              </label>
+              <label>
+                <span>2FA 密码</span>
+                <input name="password" type="password" />
+              </label>
+            </div>
+            <div class="split">
+              <button class="text-button" type="submit" data-step="start">发送验证码</button>
+              <button class="primary-button" type="submit" data-step="verify">确认添加</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>导入 StringSession</h2>
+          <form id="sessionImportForm" class="form">
+            <label>
+              <span>手机号</span>
+              <input name="phone" placeholder="+8613800000000" />
+            </label>
+            <label>
+              <span>Telethon StringSession</span>
+              <textarea name="session" rows="5" placeholder="粘贴 StringSession"></textarea>
+            </label>
+            <button class="primary-button" type="submit">导入账号</button>
+          </form>
+        </section>
+      </section>
+
+      <section id="batchView" class="view">
+        <form id="batchForm" class="form panel">
+          <h2>批量任务</h2>
+          <label>
+            <span>任务类型</span>
+            <select name="type">
+              <option value="send">发送消息</option>
+              <option value="subscribe">关注频道/群</option>
+              <option value="react">添加反应</option>
+              <option value="unreact">取消反应</option>
+              <option value="view_post">浏览帖子</option>
+              <option value="forward">转发消息</option>
+            </select>
+          </label>
+          <div class="split">
+            <label>
+              <span>起始账号 ID</span>
+              <input name="start_id" inputmode="numeric" value="1" />
+            </label>
+            <label>
+              <span>数量</span>
+              <input name="count" inputmode="numeric" value="1" />
+            </label>
+          </div>
+          <label>
+            <span>目标</span>
+            <input name="target" placeholder="@your_channel 或 ID" />
+          </label>
+          <label class="forward-only hidden">
+            <span>源目标</span>
+            <input name="source" placeholder="@source_channel 或 ID" />
+          </label>
+          <label class="text-only">
+            <span>文本</span>
+            <textarea name="text" rows="4" placeholder="要发送的内容"></textarea>
+          </label>
+          <div class="split message-fields hidden">
+            <label>
+              <span>消息 ID</span>
+              <input name="message_id" inputmode="numeric" />
+            </label>
+            <label class="react-only hidden">
+              <span>Emoji</span>
+              <input name="emoji" value="👍" />
+            </label>
+          </div>
+          <button class="primary-button" type="submit">运行任务</button>
+        </form>
+      </section>
+
+      <section id="settingsView" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>授权目标</h2>
+            <button id="reloadTargetsBtn" class="text-button" type="button">刷新</button>
+          </div>
+          <form id="targetForm" class="compact-form">
+            <input name="target_type" placeholder="类型" value="channel" />
+            <input name="target_ref" placeholder="@target 或 ID" />
+            <input name="title" placeholder="标题" />
+            <button class="text-button" type="submit">添加</button>
+          </form>
+          <div id="targetsList" class="list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>批量速率</h2>
+          <form id="rateForm" class="form">
+            <input type="hidden" name="scope" value="batch" />
+            <div class="split">
+              <label>
+                <span>动作数</span>
+                <input name="max_actions" inputmode="numeric" value="8" />
+              </label>
+              <label>
+                <span>窗口秒数</span>
+                <input name="per_seconds" inputmode="numeric" value="60" />
+              </label>
+            </div>
+            <div class="split">
+              <label>
+                <span>随机等待最小</span>
+                <input name="jitter_min" inputmode="numeric" value="2" />
+              </label>
+              <label>
+                <span>随机等待最大</span>
+                <input name="jitter_max" inputmode="numeric" value="6" />
+              </label>
+            </div>
+            <button class="primary-button" type="submit">保存速率</button>
+          </form>
+          <div id="ratesList" class="list compact"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/mini-app/static/app.js?v=20260805-1745"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+aiogram>=3.6,<4
+aiohttp>=3.9,<4
+alembic>=1.13,<2
+asyncpg>=0.29,<1
+cryptography>=50,<51
+pydantic>=2.7,<3
+pydantic-settings>=2.11,<3
+SQLAlchemy>=2.0,<3
+Telethon>=1.36,<2

@@ -1,0 +1,17 @@
+from pathlib import Path
+
+
+def test_initial_migration_matches_incremental_history() -> None:
+    initial = Path("alembic/versions/0001_initial.py").read_text(encoding="utf-8")
+    second = Path("alembic/versions/0002_service_message_full_text.py").read_text(encoding="utf-8")
+    third = Path("alembic/versions/0003_service_source_unique.py").read_text(encoding="utf-8")
+    fifth = Path("alembic/versions/0005_login_email_protection.py").read_text(encoding="utf-8")
+    sixth = Path("alembic/versions/0006_login_email_retry_count.py").read_text(encoding="utf-8")
+    assert 'sa.Column("text", sa.Text()' not in initial
+    assert "uq_service_account_message" in initial
+    assert 'op.add_column("service_messages"' in second
+    assert 'op.drop_constraint("uq_service_account_message"' in third
+    assert '"login_email_whitelist"' in fifth
+    assert '"login_email_protection_events"' in fifth
+    assert '"login_email_encrypted"' in fifth
+    assert '"attempt_count"' in sixth

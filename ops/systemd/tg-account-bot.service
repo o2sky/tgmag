@@ -1,0 +1,30 @@
+[Unit]
+Description=Telegram Account Management Bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg-account-bot
+EnvironmentFile=/opt/tg-account-bot/.env
+ExecStart=/opt/tg-account-bot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+User=tg-account-bot
+Group=tg-account-bot
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/tg-account-bot/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
