@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.bot.handlers import forward_to_target, login_email_runtime_status, parse_account_selection
+from app.bot.handlers import (
+    forward_to_target,
+    login_email_guard_callback,
+    login_email_runtime_status,
+    parse_account_selection,
+)
 from app.config import settings
 from app.services import security_health
 from app.services.rate_limit import validate_rate_values
@@ -45,12 +50,46 @@ def test_forward_adapter_uses_source_message_target_order(monkeypatch: pytest.Mo
     call.assert_awaited_once_with(pool, 7, "@source", 42, "@target")
 
 
+def test_domain_add_prompt_has_clickable_cancel_button() -> None:
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    message = SimpleNamespace(answer=AsyncMock())
+    callback = SimpleNamespace(
+        data="emailguard:add",
+        answer=AsyncMock(),
+        message=message,
+    )
+    state = SimpleNamespace(set_state=AsyncMock())
+
+    asyncio.run(
+        login_email_guard_callback(
+            callback,
+            lambda: Session(),
+            object(),
+            state,
+        )
+    )
+
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "取消当前操作"
+    assert button.callback_data == "flow:cancel"
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
         ({"configuration_ready": False}, "配置不完整"),
         ({"monitor_enabled": False}, "实时监听已关闭"),
-        ({"active_count": 0, "connected_count": 0, "protected_connected_count": 0}, "没有 active 账号"),
+        (
+            {"active_count": 0, "connected_count": 0, "protected_connected_count": 0},
+            "没有 active 账号",
+        ),
         ({"connected_count": 0, "protected_connected_count": 0}, "账号均未连接"),
         ({"protected_connected_count": 0}, "已连接账号均在白名单"),
         ({"health_checked": False}, "Gmail IMAP 尚未检查"),
@@ -81,32 +120,38 @@ def test_login_email_runtime_status_explains_non_operational_states(
 
 def test_login_email_runtime_status_reports_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "login_email_protection_enabled", False)
-    assert login_email_runtime_status(
-        configuration_ready=True,
-        monitor_enabled=True,
-        monitor_running=True,
-        active_count=1,
-        connected_count=1,
-        protected_connected_count=1,
-        health_checked=True,
-        health_error=None,
-    ) == "已停用"
+    assert (
+        login_email_runtime_status(
+            configuration_ready=True,
+            monitor_enabled=True,
+            monitor_running=True,
+            active_count=1,
+            connected_count=1,
+            protected_connected_count=1,
+            health_checked=True,
+            health_error=None,
+        )
+        == "已停用"
+    )
 
 
 def test_login_email_runtime_status_detects_dead_monitor_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "login_email_protection_enabled", True)
-    assert login_email_runtime_status(
-        configuration_ready=True,
-        monitor_enabled=True,
-        monitor_running=False,
-        active_count=1,
-        connected_count=1,
-        protected_connected_count=1,
-        health_checked=True,
-        health_error=None,
-    ) == "实时监听任务未运行"
+    assert (
+        login_email_runtime_status(
+            configuration_ready=True,
+            monitor_enabled=True,
+            monitor_running=False,
+            active_count=1,
+            connected_count=1,
+            protected_connected_count=1,
+            health_checked=True,
+            health_error=None,
+        )
+        == "实时监听任务未运行"
+    )
 
 
 def test_security_health_report_never_calls_warning_state_available() -> None:

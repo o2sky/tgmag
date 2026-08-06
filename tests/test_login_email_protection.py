@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.config import settings
 from app.services import login_email_protection
@@ -14,7 +16,6 @@ from app.services.login_email_protection import (
     parse_telegram_login_email,
     recover_incomplete_events,
 )
-
 
 SAMPLE_EMAIL = b"""From: Telegram <noreply@telegram.org>
 To: testime001@mail.example.com
@@ -136,7 +137,7 @@ def test_gmail_reader_finds_exact_forwarded_alias(monkeypatch) -> None:
     monkeypatch.setattr(settings, "login_email_poll_interval_seconds", 0.01)
     code = GmailCodeReader().wait_for_code_sync(
         "testime001@mail.example.com",
-        datetime(2026, 8, 5, 5, 45, tzinfo=timezone.utc),
+        datetime(2026, 8, 5, 5, 45, tzinfo=UTC),
     )
     assert code == "853353"
 
@@ -169,3 +170,70 @@ def test_incomplete_protection_events_become_retryable() -> None:
 
     assert asyncio.run(recover_incomplete_events(Sessionmaker())) == 3
     assert session.committed is True
+
+
+def test_every_post_session_login_alert_runs_without_cooldown(monkeypatch) -> None:
+    class Session:
+        scalar_calls = 0
+        added = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def scalar(self, statement):
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return None
+            return SimpleNamespace(status="succeeded")
+
+        async def get(self, model, key):
+            if model is login_email_protection.TgAccount:
+                return SimpleNamespace(phone_encrypted="encrypted-phone")
+            return None
+
+        def add(self, record):
+            record.id = 91
+            self.added = record
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            return None
+
+    session = Session()
+
+    class Sessionmaker:
+        def __call__(self):
+            return session
+
+    protector = LoginEmailProtector.__new__(LoginEmailProtector)
+    protector.sessionmaker = Sessionmaker()
+    protector._account_locks = {}
+    protector._execute_change = AsyncMock()
+    protector._notify = AsyncMock()
+    monkeypatch.setattr(settings, "login_email_protection_enabled", True)
+    monkeypatch.setattr(
+        login_email_protection,
+        "get_selected_domain",
+        AsyncMock(return_value="mail.example.com"),
+    )
+    monkeypatch.setattr(login_email_protection, "decrypt_text", lambda value: "+12025550147")
+    monkeypatch.setattr(login_email_protection, "encrypt_text", lambda value: f"enc:{value}")
+
+    asyncio.run(
+        protector.handle(
+            4,
+            73,
+            "Login code: 97588. Do not give this code to anyone.",
+            object(),
+        )
+    )
+
+    assert session.scalar_calls == 1
+    assert session.added.status == "requesting"
+    protector._execute_change.assert_awaited_once()
+    protector._notify.assert_not_awaited()

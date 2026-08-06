@@ -2224,12 +2224,11 @@ async def login_email_guard_callback(
             text, panel = await login_email_domains_view(session)
         elif action == "add":
             await state.set_state(LoginEmailDomainFlow.value)
-            await callback.answer()
-            if callback.message:
-                await callback.message.answer(
-                    "请输入要添加的 catch-all 邮箱域名，例如 mail.example.com",
-                    reply_markup=force_reply("仅输入域名，不包含 @"),
-                )
+            await ask_callback_with_cancel(
+                callback,
+                "请输入要添加的 catch-all 邮箱域名，例如 mail.example.com",
+                "仅输入域名，不包含 @",
+            )
             return
         elif action == "deleteask" and len(parts) == 3:
             domains = await get_available_domains(session)
@@ -2351,9 +2350,10 @@ async def login_email_domain_add(
             added = await add_available_domain(session, domain)
             text, panel = await login_email_domains_view(session)
     except ValueError as exc:
-        await message.answer(
-            f"添加失败：{exc}\n请重新输入域名，或发送 /cancel 退出。",
-            reply_markup=force_reply("例如 mail.example.com"),
+        await ask_with_cancel(
+            message,
+            f"添加失败：{exc}\n请重新输入域名。",
+            "例如 mail.example.com",
         )
         return
     await state.clear()

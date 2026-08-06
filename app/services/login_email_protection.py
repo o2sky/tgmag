@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from email import policy
-from email.header import decode_header
-from email.message import Message
-from email.parser import BytesParser
-from email.utils import getaddresses, parsedate_to_datetime
 import imaplib
 import json
 import logging
 import re
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from email import policy
+from email.header import decode_header
+from email.message import Message
+from email.parser import BytesParser
+from email.utils import getaddresses, parsedate_to_datetime
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import delete, desc, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telethon import TelegramClient
 
@@ -96,7 +96,9 @@ async def recover_incomplete_events(
     async with sessionmaker() as session:
         result = await session.execute(
             update(LoginEmailProtectionEvent)
-            .where(LoginEmailProtectionEvent.status.in_({"detected", "requesting", "waiting_email"}))
+            .where(
+                LoginEmailProtectionEvent.status.in_({"detected", "requesting", "waiting_email"})
+            )
             .values(status="interrupted", error="服务曾异常停止，可从保护事件中重新发起换绑")
         )
         await session.commit()
@@ -142,11 +144,7 @@ def parse_telegram_login_email(
 ) -> TelegramLoginEmailCode | None:
     """Return a code only when sender, recipient and Login purpose all match."""
     message = BytesParser(policy=policy.default).parsebytes(raw_message)
-    senders = {
-        address.lower()
-        for _, address in getaddresses([message.get("From", "")])
-        if address
-    }
+    senders = {address.lower() for _, address in getaddresses([message.get("From", "")]) if address}
     if expected_sender.lower() not in senders:
         return None
 
@@ -158,11 +156,7 @@ def parse_telegram_login_email(
         for name in ("To", "Delivered-To", "X-Original-To", "Envelope-To")
         if (value := message.get(name))
     ]
-    recipients = {
-        address.lower()
-        for _, address in getaddresses(recipient_headers)
-        if address
-    }
+    recipients = {address.lower() for _, address in getaddresses(recipient_headers) if address}
     normalized_target = target_email.lower()
     if normalized_target not in recipients:
         return None
@@ -183,7 +177,7 @@ def parse_telegram_login_email(
     try:
         sent_at = parsedate_to_datetime(message.get("Date", ""))
         if sent_at is not None and sent_at.tzinfo is None:
-            sent_at = sent_at.replace(tzinfo=timezone.utc)
+            sent_at = sent_at.replace(tzinfo=UTC)
     except (TypeError, ValueError, OverflowError):
         sent_at = None
     return TelegramLoginEmailCode(body_match.group(1), normalized_target, sent_at)
@@ -215,7 +209,7 @@ class GmailCodeReader:
 
     def wait_for_code_sync(self, target_email: str, requested_at: datetime) -> str:
         deadline = time.monotonic() + settings.login_email_poll_timeout_seconds
-        earliest = requested_at.astimezone(timezone.utc) - timedelta(minutes=2)
+        earliest = requested_at.astimezone(UTC) - timedelta(minutes=2)
         since = earliest.strftime("%d-%b-%Y")
         connection = imaplib.IMAP4_SSL(
             settings.login_email_imap_host,
@@ -244,7 +238,11 @@ class GmailCodeReader:
                     if status != "OK":
                         continue
                     raw = next(
-                        (item[1] for item in fetched if isinstance(item, tuple) and isinstance(item[1], bytes)),
+                        (
+                            item[1]
+                            for item in fetched
+                            if isinstance(item, tuple) and isinstance(item[1], bytes)
+                        ),
                         None,
                     )
                     if raw is None:
@@ -256,7 +254,7 @@ class GmailCodeReader:
                     )
                     if parsed is None:
                         continue
-                    if parsed.sent_at is not None and parsed.sent_at.astimezone(timezone.utc) < earliest:
+                    if parsed.sent_at is not None and parsed.sent_at.astimezone(UTC) < earliest:
                         continue
                     return parsed.code
                 time.sleep(settings.login_email_poll_interval_seconds)
@@ -400,7 +398,9 @@ class LoginEmailProtector:
             try:
                 await self.bot.send_message(admin_id, text, reply_markup=reply_markup)
             except TelegramAPIError:
-                logger.warning("Failed to send login email protection notice to %s", admin_id, exc_info=True)
+                logger.warning(
+                    "Failed to send login email protection notice to %s", admin_id, exc_info=True
+                )
             except Exception:
                 logger.exception("Unexpected login email protection notification failure")
 
@@ -499,27 +499,6 @@ class LoginEmailProtector:
                 await session.commit()
                 await self._notify(f"登录邮箱保护失败\n账号 #{account_id}\n原因：未配置邮箱域名。")
                 return
-            if settings.login_email_cooldown_seconds:
-                cutoff = datetime.now(timezone.utc) - timedelta(
-                    seconds=settings.login_email_cooldown_seconds
-                )
-                recent = await session.scalar(
-                    select(LoginEmailProtectionEvent)
-                    .where(
-                        LoginEmailProtectionEvent.account_id == account_id,
-                        LoginEmailProtectionEvent.status == "succeeded",
-                        LoginEmailProtectionEvent.confirmed_at >= cutoff,
-                    )
-                    .order_by(desc(LoginEmailProtectionEvent.confirmed_at))
-                    .limit(1)
-                )
-                if recent is not None:
-                    event.status = "cooldown"
-                    await session.commit()
-                    await self._notify(
-                        f"登录邮箱保护\n账号 #{account_id} 处于换绑冷却期，仅转发本次登录提醒。"
-                    )
-                    return
             phone = decrypt_text(account.phone_encrypted)
             target_email = build_alias(phone, domain)
             event.target_email_encrypted = encrypt_text(target_email)
@@ -563,9 +542,7 @@ class LoginEmailProtector:
                 event.confirmed_at = None
                 event.attempt_count += 1
                 await session.commit()
-            await self._notify(
-                f"已开始快捷换绑\n账号：#{account_id}\n目标域名：@{domain}"
-            )
+            await self._notify(f"已开始快捷换绑\n账号：#{account_id}\n目标域名：@{domain}")
             await self._execute_change(event_id, account_id, target_email, domain, client)
 
     async def _execute_change(
@@ -578,7 +555,7 @@ class LoginEmailProtector:
     ) -> None:
         try:
             await account_ops.send_login_email_code(client, target_email)
-            requested_at = datetime.now(timezone.utc)
+            requested_at = datetime.now(UTC)
             await self._set_event_status(
                 event_id,
                 "waiting_email",
@@ -590,7 +567,7 @@ class LoginEmailProtector:
             confirmed_email = str(getattr(result, "email", "") or "")
             if confirmed_email and confirmed_email.lower() != target_email.lower():
                 raise RuntimeError("Telegram 返回的确认邮箱与目标邮箱不一致")
-            confirmed_at = datetime.now(timezone.utc)
+            confirmed_at = datetime.now(UTC)
             async with self.sessionmaker() as session:
                 security = await session.get(AccountSecurity, account_id)
                 if security is None:
