@@ -81,6 +81,14 @@ class TelegramLoginEmailCode:
     sent_at: datetime | None
 
 
+@dataclass(frozen=True)
+class LoginEmailWindowNotice:
+    event_id: int
+    window_ends_at: datetime
+    alert_count: int
+    starts_new_window: bool
+
+
 def is_login_code_alert(text: str) -> bool:
     """Recognize the 777000 login-code alert without depending on its full wording."""
     value = text or ""
@@ -453,17 +461,24 @@ class LoginEmailProtector:
     ) -> None:
         if not is_login_code_alert(text):
             return
+        notice = await self.record_alert(account_id, service_message_id)
+        if notice is not None and notice.starts_new_window:
+            await self.wait_for_window(notice.event_id, client)
+
+    async def record_alert(
+        self,
+        account_id: int,
+        service_message_id: int,
+    ) -> LoginEmailWindowNotice | None:
         lock = self._account_locks.setdefault(account_id, asyncio.Lock())
         async with lock:
-            event_id = await self._record_alert_locked(account_id, service_message_id)
-        if event_id is not None:
-            await self.wait_for_window(event_id, client)
+            return await self._record_alert_locked(account_id, service_message_id)
 
     async def _record_alert_locked(
         self,
         account_id: int,
         service_message_id: int,
-    ) -> int | None:
+    ) -> LoginEmailWindowNotice | None:
         async with self.sessionmaker() as session:
             existing = await session.scalar(
                 select(LoginEmailProtectionEvent).where(
@@ -532,7 +547,12 @@ class LoginEmailProtector:
                 ):
                     active_window.last_detected_at = alert_at
                 await session.commit()
-                return None
+                return LoginEmailWindowNotice(
+                    event_id=active_window.id,
+                    window_ends_at=active_window.window_ends_at,
+                    alert_count=active_window.alert_count,
+                    starts_new_window=False,
+                )
 
             event.status = "waiting_window"
             event.window_ends_at = alert_at + timedelta(
@@ -542,7 +562,12 @@ class LoginEmailProtector:
             await session.flush()
             event_id = event.id
             await session.commit()
-            return event_id
+            return LoginEmailWindowNotice(
+                event_id=event_id,
+                window_ends_at=event.window_ends_at,
+                alert_count=event.alert_count,
+                starts_new_window=True,
+            )
 
     async def wait_for_window(
         self,

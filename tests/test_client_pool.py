@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.config import settings
+from app.services.login_email_protection import LoginEmailWindowNotice
 from app.tg.client_pool import ClientPool
 
 
@@ -45,7 +46,12 @@ def test_existing_service_row_still_reaches_protector() -> None:
     pool = ClientPool.__new__(ClientPool)
     pool.sessionmaker = FakeSessionmaker(session)
     pool.bot = SimpleNamespace(send_message=AsyncMock())
-    pool.login_email_protector = SimpleNamespace(handle=AsyncMock())
+    deadline = datetime.now(UTC) + timedelta(hours=8)
+    notice = LoginEmailWindowNotice(91, deadline, 1, True)
+    pool.login_email_protector = SimpleNamespace(
+        record_alert=AsyncMock(return_value=notice),
+        wait_for_window=AsyncMock(),
+    )
     pool._service_message_locks = {}
     pool._protection_tasks = set()
     pool._is_post_session_login_alert = AsyncMock(return_value=True)
@@ -65,7 +71,9 @@ def test_existing_service_row_still_reaches_protector() -> None:
 
     asyncio.run(exercise())
 
-    pool.login_email_protector.handle.assert_awaited_once_with(4, 73, text, client)
+    pool.login_email_protector.record_alert.assert_awaited_once_with(4, 73)
+    pool.login_email_protector.wait_for_window.assert_awaited_once_with(91, client)
+    assert "已开启 8 小时登录邮箱保护窗口" in pool._window_notice_text(notice)
     pool.bot.send_message.assert_not_awaited()
     assert session.committed is True
 
@@ -82,7 +90,7 @@ def test_initial_manual_login_alert_is_stored_without_protection() -> None:
     pool = ClientPool.__new__(ClientPool)
     pool.sessionmaker = FakeSessionmaker(session)
     pool.bot = SimpleNamespace(send_message=AsyncMock())
-    pool.login_email_protector = SimpleNamespace(handle=AsyncMock())
+    pool.login_email_protector = SimpleNamespace(record_alert=AsyncMock())
     pool._service_message_locks = {}
     pool._protection_tasks = set()
     pool._is_post_session_login_alert = AsyncMock(return_value=False)
@@ -100,9 +108,66 @@ def test_initial_manual_login_alert_is_stored_without_protection() -> None:
 
     asyncio.run(exercise())
 
-    pool.login_email_protector.handle.assert_not_awaited()
+    pool.login_email_protector.record_alert.assert_not_awaited()
     pool.bot.send_message.assert_not_awaited()
     assert session.committed is True
+
+
+def test_each_login_notification_includes_current_window_status(monkeypatch) -> None:
+    text = "Login code: 97588. Do not give this code to anyone."
+    deadline = datetime(2026, 8, 6, 10, 47, 14, tzinfo=UTC)
+    notice = LoginEmailWindowNotice(91, deadline, 3, False)
+
+    class Session:
+        record = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def scalar(self, statement):
+            return None
+
+        def add(self, record):
+            self.record = record
+
+        async def flush(self):
+            self.record.id = 73
+
+        async def commit(self):
+            return None
+
+    session = Session()
+    pool = ClientPool.__new__(ClientPool)
+    pool.sessionmaker = FakeSessionmaker(session)
+    pool.bot = SimpleNamespace(send_message=AsyncMock())
+    pool.login_email_protector = SimpleNamespace(
+        record_alert=AsyncMock(return_value=notice),
+    )
+    pool._service_message_locks = {}
+    pool._protection_tasks = set()
+    pool._is_post_session_login_alert = AsyncMock(return_value=True)
+    monkeypatch.setattr(settings, "admin_ids", [123])
+
+    asyncio.run(
+        pool._ingest_service_message(
+            account_id=4,
+            source_user_id=777000,
+            message_id=101,
+            text=text,
+            received_at=datetime.now(UTC),
+            client=object(),
+        )
+    )
+
+    sent_text = pool.bot.send_message.await_args.args[1]
+    assert text in sent_text
+    assert "当前处于登录邮箱保护窗口" in sent_text
+    assert "当前累计：3 次" in sent_text
+    assert "截止时间：" in sent_text
+    assert "不换绑且不顺延" in sent_text
 
 
 def test_only_login_alerts_after_active_session_are_protected() -> None:

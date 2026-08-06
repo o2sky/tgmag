@@ -17,7 +17,11 @@ from telethon.sessions import StringSession
 from app.config import settings
 from app.db.models import LoginEmailProtectionEvent, ServiceMessage, TgAccount, TgSession
 from app.services.crypto import decrypt_text
-from app.services.login_email_protection import LoginEmailProtector, is_login_code_alert
+from app.services.login_email_protection import (
+    LoginEmailProtector,
+    LoginEmailWindowNotice,
+    is_login_code_alert,
+)
 
 logger = logging.getLogger(__name__)
 REALTIME_SERVICE_SOURCE_IDS = {777000}
@@ -276,20 +280,35 @@ class ClientPool:
                 client,
             )
 
-    def _schedule_login_email_protection(
+    def _schedule_login_email_window(
         self,
-        account_id: int,
-        service_message_id: int,
-        text: str,
+        notice: LoginEmailWindowNotice,
         client: TelegramClient,
     ) -> None:
-        if not is_login_code_alert(text):
+        if not notice.starts_new_window:
             return
         task = asyncio.create_task(
-            self.login_email_protector.handle(account_id, service_message_id, text, client),
-            name=f"login-email-protection-{account_id}-{service_message_id}",
+            self.login_email_protector.wait_for_window(notice.event_id, client),
+            name=f"login-email-window-{notice.event_id}",
         )
         self._track_protection_task(task)
+
+    @staticmethod
+    def _window_notice_text(notice: LoginEmailWindowNotice) -> str:
+        deadline = notice.window_ends_at
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        heading = (
+            "🕗 已开启 8 小时登录邮箱保护窗口"
+            if notice.starts_new_window
+            else "🕗 当前处于登录邮箱保护窗口"
+        )
+        return (
+            f"{heading}\n"
+            f"截止时间：{deadline.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+            f"当前累计：{notice.alert_count} 次\n"
+            "窗口内仅转发提醒，不换绑且不顺延；到期后自动换绑并发送汇总。"
+        )
 
     async def _is_post_session_login_alert(
         self,
@@ -367,8 +386,19 @@ class ClientPool:
         # The alert used to create/import the current Session predates that
         # Session and is only the enrollment baseline. Protect strictly newer
         # alerts, including existing rows saved by a manual history pull.
+        window_notice = None
         if await self._is_post_session_login_alert(account_id, text, received_at):
-            self._schedule_login_email_protection(account_id, service_message_id, text, client)
+            try:
+                window_notice = await self.login_email_protector.record_alert(
+                    account_id, service_message_id
+                )
+                if window_notice is not None:
+                    self._schedule_login_email_window(window_notice, client)
+            except Exception:
+                logger.exception(
+                    "Failed to record login email protection window for account %s",
+                    account_id,
+                )
         elif is_login_code_alert(text):
             logger.info(
                 "Stored baseline login alert without protection for account %s, message %s",
@@ -377,12 +407,15 @@ class ClientPool:
             )
         if not created:
             return
+        notification_text = (
+            f"服务消息\n账号ID: {account_id}\n来源: {source_user_id}\n"
+            f"消息ID: {message_id}\n内容:\n{text[:3500]}"
+        )
+        if window_notice is not None:
+            notification_text += f"\n\n{self._window_notice_text(window_notice)}"
         for admin_id in settings.admin_ids:
             try:
-                await self.bot.send_message(
-                    admin_id,
-                    f"服务消息\n账号ID: {account_id}\n来源: {source_user_id}\n消息ID: {message_id}\n内容:\n{text[:3500]}",
-                )
+                await self.bot.send_message(admin_id, notification_text)
             except TelegramAPIError:
                 logger.warning(
                     "Failed to notify admin %s for service message %s",

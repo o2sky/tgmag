@@ -224,9 +224,12 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
         AsyncMock(return_value="mail.example.com"),
     )
 
-    event_id = asyncio.run(protector._record_alert_locked(4, 73))
+    notice = asyncio.run(protector._record_alert_locked(4, 73))
 
-    assert event_id == 91
+    assert notice is not None
+    assert notice.event_id == 91
+    assert notice.starts_new_window is True
+    assert notice.alert_count == 1
     assert session.scalar_calls == 2
     assert session.added.status == "waiting_window"
     assert session.added.alert_count == 1
@@ -289,9 +292,13 @@ def test_alerts_inside_window_are_merged_without_extending_it(monkeypatch) -> No
         AsyncMock(return_value="mail.example.com"),
     )
 
-    event_id = asyncio.run(protector._record_alert_locked(4, 74))
+    notice = asyncio.run(protector._record_alert_locked(4, 74))
 
-    assert event_id is None
+    assert notice is not None
+    assert notice.event_id == 91
+    assert notice.starts_new_window is False
+    assert notice.alert_count == 2
+    assert notice.window_ends_at == window_ends_at
     assert session.added.status == "merged"
     assert session.added.parent_event_id == 91
     assert session.added.window_ends_at == window_ends_at
