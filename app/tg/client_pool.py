@@ -58,6 +58,39 @@ class ClientPool:
                 self._monitor_loop(),
                 name="telegram-service-monitor",
             )
+        await self.restore_pending_protection_windows()
+
+    async def restore_pending_protection_windows(self) -> None:
+        async with self.sessionmaker() as session:
+            events_to_restore = list(
+                (
+                    await session.scalars(
+                        select(LoginEmailProtectionEvent)
+                        .where(
+                            LoginEmailProtectionEvent.status == "waiting_window",
+                            LoginEmailProtectionEvent.parent_event_id.is_(None),
+                        )
+                        .order_by(LoginEmailProtectionEvent.window_ends_at)
+                    )
+                ).all()
+            )
+        for event in events_to_restore:
+            if self.login_email_protector.has_window_waiter(event.id):
+                continue
+            try:
+                client = await self.get_client(event.account_id)
+            except Exception:
+                logger.exception(
+                    "Failed to restore login email window %s for account %s",
+                    event.id,
+                    event.account_id,
+                )
+                continue
+            task = asyncio.create_task(
+                self.login_email_protector.wait_for_window(event.id, client),
+                name=f"login-email-window-{event.id}",
+            )
+            self._track_protection_task(task)
 
     async def stop_service_monitor(self) -> None:
         self.monitor_enabled = False
@@ -80,6 +113,7 @@ class ClientPool:
                 break
             try:
                 await self.connect_all_active()
+                await self.restore_pending_protection_windows()
             except Exception:
                 logger.exception("Periodic Telegram client reconnect failed")
 

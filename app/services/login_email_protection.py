@@ -27,6 +27,7 @@ from app.db.models import (
     LoginEmailProtectionEvent,
     LoginEmailWhitelist,
     RuntimeSetting,
+    ServiceMessage,
     TgAccount,
 )
 from app.services.crypto import decrypt_text, encrypt_text
@@ -387,7 +388,12 @@ class LoginEmailProtector:
         self.bot = bot
         self.reader = reader or GmailCodeReader()
         self._account_locks: dict[int, asyncio.Lock] = {}
+        self._window_waiters: dict[int, asyncio.Task[None]] = {}
         self._gmail_slots = asyncio.Semaphore(3)
+
+    def has_window_waiter(self, event_id: int) -> bool:
+        task = self._window_waiters.get(event_id)
+        return task is not None and not task.done()
 
     async def _notify(
         self,
@@ -449,14 +455,15 @@ class LoginEmailProtector:
             return
         lock = self._account_locks.setdefault(account_id, asyncio.Lock())
         async with lock:
-            await self._handle_locked(account_id, service_message_id, client)
+            event_id = await self._record_alert_locked(account_id, service_message_id)
+        if event_id is not None:
+            await self.wait_for_window(event_id, client)
 
-    async def _handle_locked(
+    async def _record_alert_locked(
         self,
         account_id: int,
         service_message_id: int,
-        client: TelegramClient,
-    ) -> None:
+    ) -> int | None:
         async with self.sessionmaker() as session:
             existing = await session.scalar(
                 select(LoginEmailProtectionEvent).where(
@@ -464,10 +471,16 @@ class LoginEmailProtector:
                 )
             )
             if existing is not None:
-                return
+                return None
+            service_message = await session.get(ServiceMessage, service_message_id)
+            if service_message is None:
+                return None
+            alert_at = service_message.received_at
+            if alert_at.tzinfo is None:
+                alert_at = alert_at.replace(tzinfo=UTC)
             account = await session.get(TgAccount, account_id)
             if account is None:
-                return
+                return None
             whitelisted = await session.get(LoginEmailWhitelist, account_id) is not None
             domain = await get_selected_domain(session)
             event = LoginEmailProtectionEvent(
@@ -475,38 +488,159 @@ class LoginEmailProtector:
                 service_message_id=service_message_id,
                 status="detected",
                 selected_domain=domain,
+                detected_at=alert_at,
+                last_detected_at=alert_at,
+                alert_count=1,
             )
-            session.add(event)
-            await session.flush()
-            event_id = event.id
             if whitelisted:
                 event.status = "whitelisted"
+                session.add(event)
                 await session.commit()
                 await self._notify(
                     f"登录邮箱保护\n账号 #{account_id} 在白名单中：仅转发 777000 登录提醒，未更改登录邮箱。"
                 )
-                return
+                return None
             if not settings.login_email_protection_enabled:
                 event.status = "disabled"
+                session.add(event)
                 await session.commit()
                 await self._notify(
                     f"登录邮箱保护\n账号 #{account_id} 检测到登录提醒，但自动换绑尚未启用。"
                 )
-                return
+                return None
+            active_window = await session.scalar(
+                select(LoginEmailProtectionEvent)
+                .where(
+                    LoginEmailProtectionEvent.account_id == account_id,
+                    LoginEmailProtectionEvent.parent_event_id.is_(None),
+                    LoginEmailProtectionEvent.status == "waiting_window",
+                    LoginEmailProtectionEvent.detected_at <= alert_at,
+                    LoginEmailProtectionEvent.window_ends_at > alert_at,
+                )
+                .order_by(LoginEmailProtectionEvent.window_ends_at.desc())
+                .limit(1)
+            )
+            if active_window is not None:
+                event.status = "merged"
+                event.parent_event_id = active_window.id
+                event.window_ends_at = active_window.window_ends_at
+                session.add(event)
+                active_window.alert_count += 1
+                if (
+                    active_window.last_detected_at is None
+                    or alert_at > active_window.last_detected_at
+                ):
+                    active_window.last_detected_at = alert_at
+                await session.commit()
+                return None
+
+            event.status = "waiting_window"
+            event.window_ends_at = alert_at + timedelta(
+                seconds=settings.login_email_aggregation_seconds
+            )
+            session.add(event)
+            await session.flush()
+            event_id = event.id
+            await session.commit()
+            return event_id
+
+    async def wait_for_window(
+        self,
+        event_id: int,
+        client: TelegramClient,
+    ) -> None:
+        current_task = asyncio.current_task()
+        if current_task is None:
+            return
+        existing_waiter = self._window_waiters.get(event_id)
+        if existing_waiter is not None and existing_waiter is not current_task:
+            return
+        self._window_waiters[event_id] = current_task
+        try:
+            while True:
+                async with self.sessionmaker() as session:
+                    event = await session.get(LoginEmailProtectionEvent, event_id)
+                    if event is None or event.status != "waiting_window":
+                        return
+                    window_ends_at = event.window_ends_at
+                    account_id = event.account_id
+                if window_ends_at is None:
+                    await self._set_event_status(event_id, "failed", error="聚合窗口结束时间缺失")
+                    return
+                if window_ends_at.tzinfo is None:
+                    window_ends_at = window_ends_at.replace(tzinfo=UTC)
+                delay = (window_ends_at - datetime.now(UTC)).total_seconds()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+
+                lock = self._account_locks.setdefault(account_id, asyncio.Lock())
+                async with lock:
+                    prepared = await self._prepare_window_change(event_id)
+                    if prepared is None:
+                        return
+                    account_id, target_email, domain = prepared
+                    await self._execute_change(event_id, account_id, target_email, domain, client)
+                    return
+        finally:
+            if self._window_waiters.get(event_id) is current_task:
+                self._window_waiters.pop(event_id, None)
+
+    async def _prepare_window_change(
+        self,
+        event_id: int,
+    ) -> tuple[int, str, str] | None:
+        async with self.sessionmaker() as session:
+            event = await session.get(LoginEmailProtectionEvent, event_id)
+            if event is None or event.status != "waiting_window":
+                return None
+            window_ends_at = event.window_ends_at
+            if window_ends_at is None:
+                event.status = "failed"
+                event.error = "聚合窗口结束时间缺失"
+                await session.commit()
+                return None
+            if window_ends_at.tzinfo is None:
+                window_ends_at = window_ends_at.replace(tzinfo=UTC)
+            if window_ends_at > datetime.now(UTC):
+                return None
+            account = await session.get(TgAccount, event.account_id)
+            if account is None:
+                event.status = "failed"
+                event.error = "账号不存在"
+                await session.commit()
+                return None
+            domain = await get_selected_domain(session)
             if domain is None:
                 event.status = "failed"
                 event.error = "未配置登录邮箱域名"
                 await session.commit()
-                await self._notify(f"登录邮箱保护失败\n账号 #{account_id}\n原因：未配置邮箱域名。")
-                return
-            phone = decrypt_text(account.phone_encrypted)
-            target_email = build_alias(phone, domain)
+                await self._notify(
+                    f"登录邮箱保护汇总失败\n账号 #{event.account_id}\n原因：未配置邮箱域名。"
+                )
+                return None
+            target_email = build_alias(decrypt_text(account.phone_encrypted), domain)
+            event.selected_domain = domain
             event.target_email_encrypted = encrypt_text(target_email)
             event.status = "requesting"
-            event.attempt_count = 1
+            event.attempt_count += 1
             await session.commit()
+            return event.account_id, target_email, domain
 
-        await self._execute_change(event_id, account_id, target_email, domain, client)
+    async def _window_summary(self, event_id: int) -> str:
+        async with self.sessionmaker() as session:
+            event = await session.get(LoginEmailProtectionEvent, event_id)
+            if event is None:
+                return "窗口内登录提醒：未知"
+            first_at = event.detected_at.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            last_at = (
+                (event.last_detected_at or event.detected_at)
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S %Z")
+            )
+            return (
+                f"8 小时窗口内登录提醒：{event.alert_count} 次\n首次：{first_at}\n最后：{last_at}"
+            )
 
     async def retry(
         self,
@@ -553,6 +687,7 @@ class LoginEmailProtector:
         domain: str,
         client: TelegramClient,
     ) -> None:
+        summary = await self._window_summary(event_id)
         try:
             await account_ops.send_login_email_code(client, target_email)
             requested_at = datetime.now(UTC)
@@ -581,8 +716,9 @@ class LoginEmailProtector:
                     event.confirmed_at = confirmed_at
                 await session.commit()
             await self._notify(
-                "登录邮箱保护成功\n"
+                "登录邮箱保护汇总：换绑成功\n"
                 f"账号：#{account_id}\n"
+                f"{summary}\n"
                 f"新登录邮箱：{target_email}\n"
                 f"完成时间：{confirmed_at.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}"
             )
@@ -593,8 +729,9 @@ class LoginEmailProtector:
             logger.exception("Login email protection failed for account %s", account_id)
             await self._set_event_status(event_id, "failed", error=str(exc))
             await self._notify(
-                "登录邮箱保护失败\n"
+                "登录邮箱保护汇总：换绑失败\n"
                 f"账号：#{account_id}\n"
+                f"{summary}\n"
                 f"本次域名：@{domain}\n"
                 f"原因：{str(exc)[:1000]}\n\n"
                 "可点击下方按钮选择其他已配置域名重试。",

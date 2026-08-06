@@ -145,6 +145,9 @@ LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | `180`，取码超时；允许 30–900 秒 |
 | `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，IMAP 轮询间隔；允许 1–30 秒 |
 | `LOGIN_EMAIL_CATCHUP_SECONDS` | 否 | `180`，服务重连时补拉近期登录提醒的时间窗口 |
+| `LOGIN_EMAIL_AGGREGATION_SECONDS` | 否 | `28800`，同账号登录提醒固定聚合窗口（8 小时） |
+
+同一账号收到第一条有效登录提醒后开始固定 8 小时窗口。窗口内的新提醒仍逐条转发给管理员，只累计次数且不会延长窗口；到期后立即执行一次登录邮箱换绑并发送包含次数、首次和末次时间的汇总结果。服务重启后会从数据库恢复尚未结束的窗口。
 
 ## 5. 生成并保管 Fernet 密钥
 
@@ -299,6 +302,7 @@ LOGIN_EMAIL_SENDER=noreply@telegram.org
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=180
 LOGIN_EMAIL_POLL_INTERVAL_SECONDS=3
 LOGIN_EMAIL_CATCHUP_SECONDS=180
+LOGIN_EMAIL_AGGREGATION_SECONDS=28800
 ```
 
 应用专用密码中即使带空格，程序也会在读取时移除空白。保存后重启服务：

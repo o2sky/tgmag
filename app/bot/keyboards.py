@@ -365,6 +365,7 @@ def login_email_events_panel(
         "whitelisted": "🟦 白名单",
         "disabled": "⚪ 未启用",
         "cooldown": "⏳ 冷却",
+        "waiting_window": "🕗 聚合中",
         "requesting": "🔄 请求中",
         "waiting_email": "📨 等待邮件",
         "interrupted": "⚠️ 已中断",

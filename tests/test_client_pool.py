@@ -180,3 +180,39 @@ def test_monitor_runtime_state_requires_a_live_task() -> None:
 
     pool._monitor_task = SimpleNamespace(done=lambda: True)
     assert pool.service_monitor_running is False
+
+
+def test_pending_aggregation_windows_are_restored_after_restart() -> None:
+    pending = SimpleNamespace(id=91, account_id=4)
+
+    class ScalarResult:
+        def all(self):
+            return [pending]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def scalars(self, statement):
+            return ScalarResult()
+
+    pool = ClientPool.__new__(ClientPool)
+    pool.sessionmaker = FakeSessionmaker(Session())
+    pool._protection_tasks = set()
+    pool.get_client = AsyncMock(return_value="client")
+    pool.login_email_protector = SimpleNamespace(
+        has_window_waiter=lambda event_id: False,
+        wait_for_window=AsyncMock(),
+    )
+
+    async def exercise() -> None:
+        await pool.restore_pending_protection_windows()
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    pool.get_client.assert_awaited_once_with(4)
+    pool.login_email_protector.wait_for_window.assert_awaited_once_with(91, "client")

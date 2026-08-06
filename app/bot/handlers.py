@@ -2148,6 +2148,7 @@ async def login_email_events_view(session: AsyncSession) -> tuple[str, InlineKey
         (
             await session.scalars(
                 select(LoginEmailProtectionEvent)
+                .where(LoginEmailProtectionEvent.parent_event_id.is_(None))
                 .order_by(desc(LoginEmailProtectionEvent.id))
                 .limit(20)
             )
@@ -2276,6 +2277,9 @@ async def login_email_guard_callback(
                 f"账号：#{event.account_id}\n"
                 f"状态：{event.status}\n"
                 f"域名：@{event.selected_domain or '-'}\n"
+                f"窗口提醒数：{event.alert_count}\n"
+                f"窗口结束：{event.window_ends_at.isoformat() if event.window_ends_at else '-'}\n"
+                f"最后提醒：{event.last_detected_at.isoformat() if event.last_detected_at else '-'}\n"
                 f"尝试次数：{event.attempt_count}\n"
                 f"检测时间：{event.detected_at.isoformat()}\n"
                 f"确认时间：{event.confirmed_at.isoformat() if event.confirmed_at else '-'}\n"

@@ -110,6 +110,7 @@ python -m app.main
 | `LOGIN_EMAIL_ALIAS_DOMAINS` | 启用邮箱保护时 | catch-all 域名列表；多个域名使用英文逗号分隔，第一个为初始默认域名。 |
 | `LOGIN_EMAIL_GMAIL_USERNAME` | 启用邮箱保护时 | 接收 catch-all 转发邮件的 Gmail 邮箱地址。 |
 | `LOGIN_EMAIL_GMAIL_APP_PASSWORD` | 启用邮箱保护时 | Gmail 应用专用密码，不是 Google 账号的普通登录密码。 |
+| `LOGIN_EMAIL_AGGREGATION_SECONDS` | 否 | 固定聚合窗口，默认 `28800` 秒（8 小时）。窗口内只转发并累计提醒，不换绑且不顺延；到期立即换绑一次并发送汇总结果。 |
 
 示例：
 
@@ -118,6 +119,7 @@ LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
 LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
 LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
+LOGIN_EMAIL_AGGREGATION_SECONDS=28800
 ```
 
 不使用登录邮箱保护时：

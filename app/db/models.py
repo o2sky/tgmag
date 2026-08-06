@@ -201,7 +201,15 @@ class LoginEmailWhitelist(Base):
 
 class LoginEmailProtectionEvent(Base):
     __tablename__ = "login_email_protection_events"
-    __table_args__ = (UniqueConstraint("service_message_id", name="uq_login_email_event_message"),)
+    __table_args__ = (
+        UniqueConstraint("service_message_id", name="uq_login_email_event_message"),
+        Index(
+            "ix_login_email_events_waiting_window",
+            "account_id",
+            "status",
+            "window_ends_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int] = mapped_column(
@@ -214,6 +222,12 @@ class LoginEmailProtectionEvent(Base):
     selected_domain: Mapped[Optional[str]] = mapped_column(String(253))
     target_email_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    parent_event_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("login_email_protection_events.id", ondelete="CASCADE"), index=True
+    )
+    window_ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_detected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    alert_count: Mapped[int] = mapped_column(Integer, default=1)
     error: Mapped[Optional[str]] = mapped_column(Text)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     email_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

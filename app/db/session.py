@@ -9,7 +9,7 @@ from app.config import settings
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-EXPECTED_DB_REVISION = "0006_login_email_retry_count"
+EXPECTED_DB_REVISION = "0007_login_email_aggregation_window"
 
 
 async def init_db() -> None:
