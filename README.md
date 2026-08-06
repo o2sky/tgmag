@@ -94,8 +94,6 @@ python -m app.main
 | 环境变量 | 必需 | 说明 |
 |---|:---:|---|
 | `BOT_TOKEN` | 是 | 从 `@BotFather` 获取的 Telegram Bot Token。 |
-| `TG_API_ID` | 是 | 从 `https://my.telegram.org` 获取的 Telegram API ID。 |
-| `TG_API_HASH` | 是 | 与 API ID 对应的 Telegram API Hash。 |
 | `ADMIN_IDS` | 是 | Bot 管理员的 Telegram 数值用户 ID；多个 ID 使用英文逗号分隔。 |
 | `DATABASE_URL` | 是 | PostgreSQL 的 SQLAlchemy asyncpg 连接串。 |
 | `FERNET_KEY` | 是 | 用于加密手机号、Session、2FA 和登录邮箱等敏感数据的主密钥。 |
