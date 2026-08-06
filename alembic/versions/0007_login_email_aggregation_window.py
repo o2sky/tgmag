@@ -4,7 +4,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0007_login_email_aggregation_window"
+revision = "0007_login_email_window"
 down_revision = "0006_login_email_retry_count"
 branch_labels = None
 depends_on = None
