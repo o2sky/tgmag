@@ -5,13 +5,17 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telethon.errors import FloodWaitError
+
 from app.config import settings
 from app.services import login_email_protection
 from app.services.login_email_protection import (
     GmailCodeReader,
     LoginEmailProtector,
     build_alias,
+    format_wait_deadline,
     is_login_code_alert,
+    login_email_wait_remaining,
     normalize_domain,
     parse_telegram_login_email,
     recover_incomplete_events,
@@ -32,6 +36,23 @@ If you didn't request this, simply ignore this message.
 Yours,
 The Telegram Team
 """
+
+
+def test_wait_message_shows_deadline_instead_of_remaining_duration(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+    requested_at = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    remaining = login_email_wait_remaining(
+        requested_at,
+        now=datetime(2026, 8, 8, 12, 1, 29, 100000, tzinfo=UTC),
+    )
+
+    assert (
+        format_wait_deadline(remaining, now=datetime(2026, 8, 8, 12, 1, 29, 100000, tzinfo=UTC))
+        == "20:05:00"
+    )
+    assert (
+        format_wait_deadline(300, now=datetime(2026, 8, 8, 15, 58, tzinfo=UTC)) == "08-09 00:03:00"
+    )
 
 
 def test_login_code_alert_matches_supported_777000_wording() -> None:
@@ -142,6 +163,35 @@ def test_gmail_reader_finds_exact_forwarded_alias(monkeypatch) -> None:
     assert code == "853353"
 
 
+def test_gmail_reader_cancellation_stops_polling_thread(monkeypatch) -> None:
+    reader = GmailCodeReader()
+    captured = {}
+
+    async def blocking_to_thread(function, *args):
+        captured["cancel_event"] = args[-1]
+        await asyncio.Future()
+
+    monkeypatch.setattr(login_email_protection.asyncio, "to_thread", blocking_to_thread)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            reader.wait_for_code(
+                "alias@mail.example.com",
+                datetime.now(UTC),
+                300,
+            )
+        )
+        await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert captured["cancel_event"].is_set() is True
+
+    asyncio.run(exercise())
+
+
 def test_incomplete_protection_events_become_retryable() -> None:
     class Result:
         rowcount = 3
@@ -157,6 +207,7 @@ def test_incomplete_protection_events_become_retryable() -> None:
 
         async def execute(self, statement):
             assert "login_email_protection_events" in str(statement)
+            assert "waiting_email" not in str(statement)
             return Result()
 
         async def commit(self):
@@ -217,7 +268,7 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
     protector._account_locks = {}
     protector._notify = AsyncMock()
     monkeypatch.setattr(settings, "login_email_protection_enabled", True)
-    monkeypatch.setattr(settings, "login_email_aggregation_seconds", 28800)
+    monkeypatch.setattr(settings, "login_email_aggregation_seconds", 86400)
     monkeypatch.setattr(
         login_email_protection,
         "get_selected_domain",
@@ -234,7 +285,7 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
     assert session.added.status == "waiting_window"
     assert session.added.alert_count == 1
     assert session.added.detected_at == detected_at
-    assert session.added.window_ends_at == detected_at + login_email_protection.timedelta(hours=8)
+    assert session.added.window_ends_at == detected_at + login_email_protection.timedelta(hours=24)
     protector._notify.assert_not_awaited()
 
 
@@ -333,10 +384,16 @@ def test_expired_window_immediately_runs_one_change() -> None:
     protector.sessionmaker = Sessionmaker()
     protector._window_waiters = {}
     protector._account_locks = {}
+    protector._change_locks = {}
     protector._prepare_window_change = AsyncMock(
         return_value=(4, "alias@mail.example.com", "mail.example.com")
     )
-    protector._execute_change = AsyncMock()
+
+    async def execute_change(*args):
+        assert protector._account_locks[4].locked() is False
+        assert protector._change_locks[4].locked() is True
+
+    protector._execute_change = AsyncMock(side_effect=execute_change)
     client = object()
 
     asyncio.run(protector.wait_for_window(91, client))
@@ -350,3 +407,124 @@ def test_expired_window_immediately_runs_one_change() -> None:
         client,
     )
     assert protector._window_waiters == {}
+
+
+def test_protection_failure_reasons_explain_mail_delay_and_flood_wait(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+
+    timeout_reason = LoginEmailProtector._friendly_failure_reason(
+        TimeoutError("等待 Telegram 登录邮箱验证码超时")
+    )
+    flood_reason = LoginEmailProtector._friendly_failure_reason(FloodWaitError(None, 600))
+
+    assert "5 分钟内未收到" in timeout_reason
+    assert "转发可能延迟" in timeout_reason
+    assert "未自动重发" in timeout_reason
+    assert "Telegram 限制尝试次数" in flood_reason
+    assert "600 秒" in flood_reason
+
+
+def test_resumed_email_wait_does_not_request_another_code(monkeypatch) -> None:
+    requested_at = datetime.now(UTC)
+    protector = LoginEmailProtector.__new__(LoginEmailProtector)
+    protector._gmail_slots = asyncio.Semaphore(1)
+    protector.reader = SimpleNamespace(
+        wait_for_code=AsyncMock(side_effect=TimeoutError("late mail"))
+    )
+    protector._window_summary = AsyncMock(return_value="summary")
+    protector._set_event_status = AsyncMock()
+    protector._notify = AsyncMock()
+    send_code = AsyncMock()
+    monkeypatch.setattr(login_email_protection.account_ops, "send_login_email_code", send_code)
+    monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+
+    asyncio.run(
+        protector._execute_change(
+            91,
+            4,
+            "alias@mail.example.com",
+            "mail.example.com",
+            object(),
+            requested_at=requested_at,
+            wait_timeout_seconds=240,
+        )
+    )
+
+    send_code.assert_not_awaited()
+    protector.reader.wait_for_code.assert_awaited_once_with(
+        "alias@mail.example.com", requested_at, 240
+    )
+    protector._set_event_status.assert_awaited_once()
+    assert "5 分钟内未收到" in protector._notify.await_args.args[0]
+
+
+def test_email_timeout_sends_one_code_request_and_never_auto_retries(monkeypatch) -> None:
+    protector = LoginEmailProtector.__new__(LoginEmailProtector)
+    protector._gmail_slots = asyncio.Semaphore(1)
+    protector.reader = SimpleNamespace(
+        wait_for_code=AsyncMock(side_effect=TimeoutError("late mail"))
+    )
+    protector._window_summary = AsyncMock(return_value="summary")
+    protector._set_event_status = AsyncMock()
+    protector._notify = AsyncMock()
+    send_code = AsyncMock(return_value={"length": 6})
+    monkeypatch.setattr(login_email_protection.account_ops, "send_login_email_code", send_code)
+    monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+
+    asyncio.run(
+        protector._execute_change(
+            91,
+            4,
+            "alias@mail.example.com",
+            "mail.example.com",
+            object(),
+        )
+    )
+
+    send_code.assert_awaited_once()
+    protector.reader.wait_for_code.assert_awaited_once()
+    assert protector._set_event_status.await_count == 2
+    assert "5 分钟内未收到" in protector._notify.await_args.args[0]
+
+
+def test_resume_waiting_email_uses_remaining_time(monkeypatch) -> None:
+    requested_at = datetime.now(UTC) - login_email_protection.timedelta(seconds=60)
+    event = SimpleNamespace(
+        id=91,
+        account_id=4,
+        status="waiting_email",
+        target_email_encrypted="encrypted-target",
+        selected_domain="mail.example.com",
+        email_requested_at=requested_at,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, model, key):
+            return event
+
+    class Sessionmaker:
+        def __call__(self):
+            return Session()
+
+    protector = LoginEmailProtector.__new__(LoginEmailProtector)
+    protector.sessionmaker = Sessionmaker()
+    protector._change_locks = {}
+    protector._execute_change = AsyncMock()
+    monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+    monkeypatch.setattr(
+        login_email_protection,
+        "decrypt_text",
+        lambda value: "alias@mail.example.com",
+    )
+
+    asyncio.run(protector.resume_waiting_email(91, object()))
+
+    kwargs = protector._execute_change.await_args.kwargs
+    assert kwargs["requested_at"] == requested_at
+    assert 230 <= kwargs["wait_timeout_seconds"] <= 240

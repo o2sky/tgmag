@@ -45,3 +45,5 @@ def test_admin_ids_load_from_documented_env_formats(
     assert loaded.admin_ids == expected
     assert loaded.login_email_protection_enabled is True
     assert loaded.login_email_catchup_seconds == 180
+    assert loaded.login_email_poll_timeout_seconds == 300
+    assert loaded.login_email_aggregation_seconds == 86400

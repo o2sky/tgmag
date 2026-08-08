@@ -71,7 +71,9 @@ class ClientPool:
                     await session.scalars(
                         select(LoginEmailProtectionEvent)
                         .where(
-                            LoginEmailProtectionEvent.status == "waiting_window",
+                            LoginEmailProtectionEvent.status.in_(
+                                {"waiting_window", "waiting_email"}
+                            ),
                             LoginEmailProtectionEvent.parent_event_id.is_(None),
                         )
                         .order_by(LoginEmailProtectionEvent.window_ends_at)
@@ -79,7 +81,14 @@ class ClientPool:
                 ).all()
             )
         for event in events_to_restore:
-            if self.login_email_protector.has_window_waiter(event.id):
+            if event.status == "waiting_window" and self.login_email_protector.has_window_waiter(
+                event.id
+            ):
+                continue
+            if (
+                event.status == "waiting_email"
+                and self.login_email_protector.has_change_in_progress(event.account_id)
+            ):
                 continue
             try:
                 client = await self.get_client(event.account_id)
@@ -90,10 +99,13 @@ class ClientPool:
                     event.account_id,
                 )
                 continue
-            task = asyncio.create_task(
-                self.login_email_protector.wait_for_window(event.id, client),
-                name=f"login-email-window-{event.id}",
-            )
+            if event.status == "waiting_email":
+                coroutine = self.login_email_protector.resume_waiting_email(event.id, client)
+                task_name = f"login-email-resume-{event.id}"
+            else:
+                coroutine = self.login_email_protector.wait_for_window(event.id, client)
+                task_name = f"login-email-window-{event.id}"
+            task = asyncio.create_task(coroutine, name=task_name)
             self._track_protection_task(task)
 
     async def stop_service_monitor(self) -> None:
@@ -298,8 +310,9 @@ class ClientPool:
         deadline = notice.window_ends_at
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=UTC)
+        hours = max(1, settings.login_email_aggregation_seconds // 3600)
         heading = (
-            "🕗 已开启 8 小时登录邮箱保护窗口"
+            f"🕗 已开启 {hours} 小时登录邮箱保护窗口"
             if notice.starts_new_window
             else "🕗 当前处于登录邮箱保护窗口"
         )

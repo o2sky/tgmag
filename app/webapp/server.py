@@ -15,6 +15,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telethon import functions
 from telethon.errors import (
+    FloodError,
     FloodWaitError,
     PasswordHashInvalidError,
     PhoneCodeEmptyError,
@@ -32,6 +33,7 @@ from app.db.models import (
     AllowedTarget,
     Job,
     JobItem,
+    LoginEmailProtectionEvent,
     PrivacySettings,
     RateLimit,
     ServiceMessage,
@@ -42,6 +44,7 @@ from app.db.models import (
 from app.services.audit import audit
 from app.services.crypto import decrypt_text, encrypt_text
 from app.services.jobs import add_job_item, create_job, finish_job
+from app.services.login_email_protection import format_wait_deadline, login_email_wait_remaining
 from app.services.rate_limit import RateGate, get_rate, validate_rate_values
 from app.services.security_health import SecurityHealthReport, run_security_health_check
 from app.services.targets import canonicalize_target_ref, require_allowed_target
@@ -1026,23 +1029,81 @@ async def api_account_login_email(request: web.Request) -> web.Response:
         email = str(data.get("email") or "").strip()
         if "@" not in email:
             raise web.HTTPBadRequest(text="valid email required")
+        pending_key = account_flow_key(user.id, account_id)
+        pending = request.app["pending_login_email"].get(pending_key)
+        if isinstance(pending, dict):
+            elapsed = time.time() - float(pending.get("requested_at") or 0)
+            remaining = settings.login_email_poll_timeout_seconds - elapsed
+            if remaining > 0:
+                raise web.HTTPConflict(
+                    text=(
+                        "该账号已发送换绑验证码，"
+                        f"请等待至 {format_wait_deadline(remaining)}；本次未重复发码"
+                    )
+                )
+            request.app["pending_login_email"].pop(pending_key, None)
+        async with sessionmaker() as session:
+            automatic_flow = await session.scalar(
+                select(LoginEmailProtectionEvent)
+                .where(
+                    LoginEmailProtectionEvent.account_id == account_id,
+                    LoginEmailProtectionEvent.status.in_({"requesting", "waiting_email"}),
+                )
+                .limit(1)
+            )
+        if automatic_flow is not None or client_pool.login_email_protector.has_change_in_progress(
+            account_id
+        ):
+            remaining = login_email_wait_remaining(
+                automatic_flow.email_requested_at if automatic_flow is not None else None
+            )
+            raise web.HTTPConflict(
+                text=(
+                    "该账号的换绑验证码正在等待邮件，"
+                    f"请等待至 {format_wait_deadline(remaining)}；本次未重复发码"
+                )
+            )
         try:
             sent = await account_ops.send_login_email_code(client, email)
+        except FloodWaitError as exc:
+            raise web.HTTPTooManyRequests(
+                text=f"Telegram 限制尝试次数，需要等待 {exc.seconds} 秒；请勿连续发码"
+            ) from exc
+        except FloodError as exc:
+            raise web.HTTPTooManyRequests(
+                text="Telegram 限制尝试次数，请稍后再试；请勿连续发码"
+            ) from exc
         except Exception as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
-        request.app["pending_login_email"][account_flow_key(user.id, account_id)] = email
+        request.app["pending_login_email"][pending_key] = {
+            "email": email,
+            "requested_at": time.time(),
+        }
+        wait_minutes = max(1, settings.login_email_poll_timeout_seconds // 60)
         return web.json_response(
-            {"ok": True, "needs_code": True, **sent, "message": "登录邮箱验证码已发送"}
+            {
+                "ok": True,
+                "needs_code": True,
+                **sent,
+                "message": f"登录邮箱验证码已发送，{wait_minutes} 分钟内不会重复发码",
+            }
         )
     if action == "confirm":
         code = str(data.get("code") or "").strip()
         pending_key = account_flow_key(user.id, account_id)
-        email = request.app["pending_login_email"].pop(pending_key, None)
+        pending = request.app["pending_login_email"].pop(pending_key, None)
+        email = pending.get("email") if isinstance(pending, dict) else pending
         try:
             await account_ops.confirm_login_email(client, code)
         except Exception as exc:
             if email:
-                request.app["pending_login_email"][pending_key] = email
+                request.app["pending_login_email"][pending_key] = pending
+            if isinstance(exc, FloodWaitError):
+                raise web.HTTPTooManyRequests(
+                    text=f"Telegram 限制尝试次数，需要等待 {exc.seconds} 秒"
+                ) from exc
+            if isinstance(exc, FloodError):
+                raise web.HTTPTooManyRequests(text="Telegram 限制尝试次数，请稍后再试") from exc
             raise web.HTTPBadRequest(text=str(exc)) from exc
         async with sessionmaker() as session:
             admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))

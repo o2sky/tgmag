@@ -5,6 +5,7 @@ import imaplib
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from email.header import decode_header
 from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -20,6 +22,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telethon import TelegramClient
+from telethon.errors import FloodError
 
 from app.config import settings
 from app.db.models import (
@@ -89,6 +92,36 @@ class LoginEmailWindowNotice:
     starts_new_window: bool
 
 
+def format_wait_deadline(seconds: float, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    local_timezone = ZoneInfo("Asia/Shanghai")
+    local_now = current.astimezone(local_timezone)
+    deadline = (current + timedelta(seconds=max(0, seconds))).astimezone(local_timezone)
+    if deadline.date() == local_now.date():
+        return deadline.strftime("%H:%M:%S")
+    return deadline.strftime("%m-%d %H:%M:%S")
+
+
+def login_email_wait_remaining(
+    requested_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    if requested_at is None:
+        return float(settings.login_email_poll_timeout_seconds)
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    return max(
+        0,
+        (
+            requested_at + timedelta(seconds=settings.login_email_poll_timeout_seconds) - current
+        ).total_seconds(),
+    )
+
+
 def is_login_code_alert(text: str) -> bool:
     """Recognize the 777000 login-code alert without depending on its full wording."""
     value = text or ""
@@ -101,13 +134,11 @@ def is_login_code_alert(text: str) -> bool:
 async def recover_incomplete_events(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> int:
-    """Make protection jobs left mid-flight by a hard stop retryable again."""
+    """Interrupt pre-email requests while preserving resumable email waits."""
     async with sessionmaker() as session:
         result = await session.execute(
             update(LoginEmailProtectionEvent)
-            .where(
-                LoginEmailProtectionEvent.status.in_({"detected", "requesting", "waiting_email"})
-            )
+            .where(LoginEmailProtectionEvent.status.in_({"detected", "requesting"}))
             .values(status="interrupted", error="服务曾异常停止，可从保护事件中重新发起换绑")
         )
         await session.commit()
@@ -216,8 +247,19 @@ class GmailCodeReader:
     async def validate_connection(self) -> None:
         await asyncio.to_thread(self.validate_connection_sync)
 
-    def wait_for_code_sync(self, target_email: str, requested_at: datetime) -> str:
-        deadline = time.monotonic() + settings.login_email_poll_timeout_seconds
+    def wait_for_code_sync(
+        self,
+        target_email: str,
+        requested_at: datetime,
+        timeout_seconds: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        timeout = (
+            settings.login_email_poll_timeout_seconds
+            if timeout_seconds is None
+            else max(0, timeout_seconds)
+        )
+        deadline = time.monotonic() + timeout
         earliest = requested_at.astimezone(UTC) - timedelta(minutes=2)
         since = earliest.strftime("%d-%b-%Y")
         connection = imaplib.IMAP4_SSL(
@@ -225,12 +267,15 @@ class GmailCodeReader:
             settings.login_email_imap_port,
             timeout=30,
         )
+        seen_uids: set[bytes] = set()
         try:
             connection.login(
                 settings.login_email_gmail_username,
                 settings.login_email_gmail_app_password,
             )
-            while time.monotonic() < deadline:
+            while time.monotonic() < deadline and not (
+                cancel_event is not None and cancel_event.is_set()
+            ):
                 status, _ = connection.select(settings.login_email_imap_folder, readonly=True)
                 if status != "OK":
                     raise RuntimeError("无法打开 Gmail IMAP 邮箱目录")
@@ -243,6 +288,8 @@ class GmailCodeReader:
                     raise RuntimeError("Gmail IMAP 搜索失败")
                 uids = (data[0] or b"").split()
                 for uid in reversed(uids[-100:]):
+                    if uid in seen_uids:
+                        continue
                     status, fetched = connection.uid("fetch", uid, "(BODY.PEEK[])")
                     if status != "OK":
                         continue
@@ -256,6 +303,7 @@ class GmailCodeReader:
                     )
                     if raw is None:
                         continue
+                    seen_uids.add(uid)
                     parsed = parse_telegram_login_email(
                         raw,
                         target_email,
@@ -266,7 +314,10 @@ class GmailCodeReader:
                     if parsed.sent_at is not None and parsed.sent_at.astimezone(UTC) < earliest:
                         continue
                     return parsed.code
-                time.sleep(settings.login_email_poll_interval_seconds)
+                if cancel_event is None:
+                    time.sleep(settings.login_email_poll_interval_seconds)
+                elif cancel_event.wait(settings.login_email_poll_interval_seconds):
+                    break
         finally:
             try:
                 connection.logout()
@@ -274,8 +325,24 @@ class GmailCodeReader:
                 pass
         raise TimeoutError("等待 Telegram 登录邮箱验证码超时")
 
-    async def wait_for_code(self, target_email: str, requested_at: datetime) -> str:
-        return await asyncio.to_thread(self.wait_for_code_sync, target_email, requested_at)
+    async def wait_for_code(
+        self,
+        target_email: str,
+        requested_at: datetime,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        cancel_event = threading.Event()
+        try:
+            return await asyncio.to_thread(
+                self.wait_for_code_sync,
+                target_email,
+                requested_at,
+                timeout_seconds,
+                cancel_event,
+            )
+        except asyncio.CancelledError:
+            cancel_event.set()
+            raise
 
 
 def normalize_domain(domain: str) -> str:
@@ -396,12 +463,17 @@ class LoginEmailProtector:
         self.bot = bot
         self.reader = reader or GmailCodeReader()
         self._account_locks: dict[int, asyncio.Lock] = {}
+        self._change_locks: dict[int, asyncio.Lock] = {}
         self._window_waiters: dict[int, asyncio.Task[None]] = {}
         self._gmail_slots = asyncio.Semaphore(3)
 
     def has_window_waiter(self, event_id: int) -> bool:
         task = self._window_waiters.get(event_id)
         return task is not None and not task.done()
+
+    def has_change_in_progress(self, account_id: int) -> bool:
+        lock = self._change_locks.get(account_id)
+        return lock is not None and lock.locked()
 
     async def _notify(
         self,
@@ -599,14 +671,16 @@ class LoginEmailProtector:
                     await asyncio.sleep(delay)
                     continue
 
-                lock = self._account_locks.setdefault(account_id, asyncio.Lock())
-                async with lock:
-                    prepared = await self._prepare_window_change(event_id)
+                change_lock = self._change_locks.setdefault(account_id, asyncio.Lock())
+                async with change_lock:
+                    lock = self._account_locks.setdefault(account_id, asyncio.Lock())
+                    async with lock:
+                        prepared = await self._prepare_window_change(event_id)
                     if prepared is None:
                         return
                     account_id, target_email, domain = prepared
                     await self._execute_change(event_id, account_id, target_email, domain, client)
-                    return
+                return
         finally:
             if self._window_waiters.get(event_id) is current_task:
                 self._window_waiters.pop(event_id, None)
@@ -663,9 +737,14 @@ class LoginEmailProtector:
                 .astimezone()
                 .strftime("%Y-%m-%d %H:%M:%S %Z")
             )
-            return (
-                f"8 小时窗口内登录提醒：{event.alert_count} 次\n首次：{first_at}\n最后：{last_at}"
-            )
+            duration_seconds = settings.login_email_aggregation_seconds
+            if event.window_ends_at is not None:
+                duration_seconds = max(
+                    1,
+                    int((event.window_ends_at - event.detected_at).total_seconds()),
+                )
+            hours = max(1, duration_seconds // 3600)
+            return f"{hours} 小时窗口内登录提醒：{event.alert_count} 次\n首次：{first_at}\n最后：{last_at}"
 
     async def retry(
         self,
@@ -681,28 +760,101 @@ class LoginEmailProtector:
             if event is None:
                 raise ValueError("保护事件不存在")
             account_id = event.account_id
-        lock = self._account_locks.setdefault(account_id, asyncio.Lock())
-        async with lock:
-            async with self.sessionmaker() as session:
-                event = await session.get(LoginEmailProtectionEvent, event_id)
-                if event is None:
-                    raise ValueError("保护事件不存在")
-                if event.status in {"requesting", "waiting_email"}:
-                    raise ValueError("该账号已有换绑流程正在进行")
-                account = await session.get(TgAccount, account_id)
-                if account is None:
-                    raise ValueError("账号不存在")
-                target_email = build_alias(decrypt_text(account.phone_encrypted), domain)
-                event.selected_domain = domain
-                event.target_email_encrypted = encrypt_text(target_email)
-                event.status = "requesting"
-                event.error = None
-                event.email_requested_at = None
-                event.confirmed_at = None
-                event.attempt_count += 1
-                await session.commit()
-            await self._notify(f"已开始快捷换绑\n账号：#{account_id}\n目标域名：@{domain}")
+        change_lock = self._change_locks.setdefault(account_id, asyncio.Lock())
+        if change_lock.locked():
+            raise ValueError("该账号正在等待换绑邮件，请勿重复请求验证码")
+        async with change_lock:
+            lock = self._account_locks.setdefault(account_id, asyncio.Lock())
+            async with lock:
+                async with self.sessionmaker() as session:
+                    event = await session.get(LoginEmailProtectionEvent, event_id)
+                    if event is None:
+                        raise ValueError("保护事件不存在")
+                    if event.status in {"requesting", "waiting_email"}:
+                        raise ValueError("该账号正在等待换绑邮件，请勿重复请求验证码")
+                    account = await session.get(TgAccount, account_id)
+                    if account is None:
+                        raise ValueError("账号不存在")
+                    target_email = build_alias(decrypt_text(account.phone_encrypted), domain)
+                    event.selected_domain = domain
+                    event.target_email_encrypted = encrypt_text(target_email)
+                    event.status = "requesting"
+                    event.error = None
+                    event.email_requested_at = None
+                    event.confirmed_at = None
+                    event.attempt_count += 1
+                    await session.commit()
+            await self._notify(
+                f"已开始快捷换绑\n账号：#{account_id}\n目标域名：@{domain}\n"
+                "系统将等待邮件转发完成，期间请勿重复请求验证码。"
+            )
             await self._execute_change(event_id, account_id, target_email, domain, client)
+
+    @staticmethod
+    def _friendly_failure_reason(exc: Exception) -> str:
+        if isinstance(exc, FloodError):
+            seconds = int(getattr(exc, "seconds", 0) or 0)
+            wait = f"至少等待 {seconds} 秒" if seconds else "请稍后再试"
+            return f"Telegram 限制尝试次数，{wait}；不要连续重新发送验证码"
+        if isinstance(exc, TimeoutError):
+            minutes = max(1, settings.login_email_poll_timeout_seconds // 60)
+            return (
+                f"{minutes} 分钟内未收到匹配的换绑验证码邮件；catch-all 转发可能延迟，"
+                "本次请求未自动重发，请确认旧邮件不会继续延迟到达后再手动重试"
+            )
+        return str(exc)
+
+    async def resume_waiting_email(
+        self,
+        event_id: int,
+        client: TelegramClient,
+    ) -> None:
+        async with self.sessionmaker() as session:
+            event = await session.get(LoginEmailProtectionEvent, event_id)
+            if event is None or event.status != "waiting_email":
+                return
+            if event.target_email_encrypted is None or event.email_requested_at is None:
+                event.status = "failed"
+                event.error = "等待邮件记录不完整，无法恢复原换绑流程"
+                account_id = event.account_id
+                await session.commit()
+                await self._notify(
+                    "登录邮箱保护汇总：换绑失败\n"
+                    f"账号：#{account_id}\n"
+                    "原因：等待邮件记录不完整，无法恢复原换绑流程。"
+                )
+                return
+            account_id = event.account_id
+            target_email = decrypt_text(event.target_email_encrypted)
+            domain = event.selected_domain or target_email.rsplit("@", 1)[-1]
+            requested_at = event.email_requested_at
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=UTC)
+        expires_at = requested_at + timedelta(seconds=settings.login_email_poll_timeout_seconds)
+        remaining = max(0, (expires_at - datetime.now(UTC)).total_seconds())
+        logger.info(
+            "Resuming original login email wait for event %s account %s with %.0f seconds remaining",
+            event_id,
+            account_id,
+            remaining,
+        )
+        change_lock = self._change_locks.setdefault(account_id, asyncio.Lock())
+        if change_lock.locked():
+            return
+        async with change_lock:
+            async with self.sessionmaker() as session:
+                current = await session.get(LoginEmailProtectionEvent, event_id)
+                if current is None or current.status != "waiting_email":
+                    return
+            await self._execute_change(
+                event_id,
+                account_id,
+                target_email,
+                domain,
+                client,
+                requested_at=requested_at,
+                wait_timeout_seconds=remaining,
+            )
 
     async def _execute_change(
         self,
@@ -711,18 +863,31 @@ class LoginEmailProtector:
         target_email: str,
         domain: str,
         client: TelegramClient,
+        *,
+        requested_at: datetime | None = None,
+        wait_timeout_seconds: float | None = None,
     ) -> None:
         summary = await self._window_summary(event_id)
         try:
-            await account_ops.send_login_email_code(client, target_email)
-            requested_at = datetime.now(UTC)
-            await self._set_event_status(
-                event_id,
-                "waiting_email",
-                email_requested_at=requested_at,
-            )
+            if requested_at is None:
+                await account_ops.send_login_email_code(client, target_email)
+                requested_at = datetime.now(UTC)
+                logger.info(
+                    "Requested one login email verification code for event %s account %s",
+                    event_id,
+                    account_id,
+                )
+                await self._set_event_status(
+                    event_id,
+                    "waiting_email",
+                    email_requested_at=requested_at,
+                )
             async with self._gmail_slots:
-                code = await self.reader.wait_for_code(target_email, requested_at)
+                code = await self.reader.wait_for_code(
+                    target_email,
+                    requested_at,
+                    wait_timeout_seconds,
+                )
             result = await account_ops.confirm_login_email(client, code)
             confirmed_email = str(getattr(result, "email", "") or "")
             if confirmed_email and confirmed_email.lower() != target_email.lower():
@@ -748,17 +913,26 @@ class LoginEmailProtector:
                 f"完成时间：{confirmed_at.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}"
             )
         except asyncio.CancelledError:
-            await self._set_event_status(event_id, "interrupted", error="服务停止，流程被中断")
+            async with self.sessionmaker() as session:
+                event = await session.get(LoginEmailProtectionEvent, event_id)
+                if event is not None and event.status == "waiting_email":
+                    event.error = "服务重启后将继续等待原验证码邮件，不会重复发码"
+                    await session.commit()
+                elif event is not None:
+                    event.status = "interrupted"
+                    event.error = "服务停止，流程被中断"
+                    await session.commit()
             raise
         except Exception as exc:
             logger.exception("Login email protection failed for account %s", account_id)
-            await self._set_event_status(event_id, "failed", error=str(exc))
+            reason = self._friendly_failure_reason(exc)
+            await self._set_event_status(event_id, "failed", error=reason)
             await self._notify(
                 "登录邮箱保护汇总：换绑失败\n"
                 f"账号：#{account_id}\n"
                 f"{summary}\n"
                 f"本次域名：@{domain}\n"
-                f"原因：{str(exc)[:1000]}\n\n"
+                f"原因：{reason[:1000]}\n\n"
                 "可点击下方按钮选择其他已配置域名重试。",
                 reply_markup=self._retry_markup(event_id),
             )

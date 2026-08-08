@@ -89,9 +89,11 @@ from app.services.jobs import add_job_item, create_job, finish_job
 from app.services.login_email_protection import (
     add_available_domain,
     delete_available_domain,
+    format_wait_deadline,
     get_available_domains,
     get_selected_domain,
     get_whitelist_ids,
+    login_email_wait_remaining,
     set_selected_domain,
     set_whitelisted,
 )
@@ -2326,7 +2328,16 @@ async def login_email_guard_callback(
                 await callback.answer("保护事件不存在", show_alert=True)
                 return
             if event.status not in {"failed", "interrupted"}:
-                await callback.answer(f"当前状态为 {event.status}，无法重试", show_alert=True)
+                if event.status in {"requesting", "waiting_email"}:
+                    remaining = login_email_wait_remaining(event.email_requested_at)
+                    await callback.answer(
+                        f"验证码已在处理，请等待至 {format_wait_deadline(remaining)}；本次未重复发码",
+                        show_alert=True,
+                    )
+                else:
+                    await callback.answer(
+                        f"当前状态为 {event.status}，无法重试", show_alert=True
+                    )
                 return
             await set_selected_domain(session, domain)
             await client_pool.retry_login_email_protection(event_id, domain)

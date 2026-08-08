@@ -34,7 +34,7 @@ class FakeSessionmaker:
         return self.session
 
 
-def test_existing_service_row_still_reaches_protector() -> None:
+def test_existing_service_row_still_reaches_protector(monkeypatch) -> None:
     text = "Login code: 97588. Do not give this code to anyone."
     record = SimpleNamespace(
         id=73,
@@ -46,7 +46,7 @@ def test_existing_service_row_still_reaches_protector() -> None:
     pool = ClientPool.__new__(ClientPool)
     pool.sessionmaker = FakeSessionmaker(session)
     pool.bot = SimpleNamespace(send_message=AsyncMock())
-    deadline = datetime.now(UTC) + timedelta(hours=8)
+    deadline = datetime.now(UTC) + timedelta(hours=24)
     notice = LoginEmailWindowNotice(91, deadline, 1, True)
     pool.login_email_protector = SimpleNamespace(
         record_alert=AsyncMock(return_value=notice),
@@ -55,6 +55,7 @@ def test_existing_service_row_still_reaches_protector() -> None:
     pool._service_message_locks = {}
     pool._protection_tasks = set()
     pool._is_post_session_login_alert = AsyncMock(return_value=True)
+    monkeypatch.setattr(settings, "login_email_aggregation_seconds", 86400)
 
     client = object()
 
@@ -73,7 +74,7 @@ def test_existing_service_row_still_reaches_protector() -> None:
 
     pool.login_email_protector.record_alert.assert_awaited_once_with(4, 73)
     pool.login_email_protector.wait_for_window.assert_awaited_once_with(91, client)
-    assert "已开启 8 小时登录邮箱保护窗口" in pool._window_notice_text(notice)
+    assert "已开启 24 小时登录邮箱保护窗口" in pool._window_notice_text(notice)
     pool.bot.send_message.assert_not_awaited()
     assert session.committed is True
 
@@ -248,7 +249,7 @@ def test_monitor_runtime_state_requires_a_live_task() -> None:
 
 
 def test_pending_aggregation_windows_are_restored_after_restart() -> None:
-    pending = SimpleNamespace(id=91, account_id=4)
+    pending = SimpleNamespace(id=91, account_id=4, status="waiting_window")
 
     class ScalarResult:
         def all(self):
@@ -270,6 +271,7 @@ def test_pending_aggregation_windows_are_restored_after_restart() -> None:
     pool.get_client = AsyncMock(return_value="client")
     pool.login_email_protector = SimpleNamespace(
         has_window_waiter=lambda event_id: False,
+        has_change_in_progress=lambda account_id: False,
         wait_for_window=AsyncMock(),
     )
 
@@ -281,3 +283,40 @@ def test_pending_aggregation_windows_are_restored_after_restart() -> None:
 
     pool.get_client.assert_awaited_once_with(4)
     pool.login_email_protector.wait_for_window.assert_awaited_once_with(91, "client")
+
+
+def test_waiting_email_is_resumed_without_sending_another_code() -> None:
+    pending = SimpleNamespace(id=92, account_id=4, status="waiting_email")
+
+    class ScalarResult:
+        def all(self):
+            return [pending]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def scalars(self, statement):
+            return ScalarResult()
+
+    pool = ClientPool.__new__(ClientPool)
+    pool.sessionmaker = FakeSessionmaker(Session())
+    pool._protection_tasks = set()
+    pool.get_client = AsyncMock(return_value="client")
+    pool.login_email_protector = SimpleNamespace(
+        has_window_waiter=lambda event_id: False,
+        has_change_in_progress=lambda account_id: False,
+        resume_waiting_email=AsyncMock(),
+    )
+
+    async def exercise() -> None:
+        await pool.restore_pending_protection_windows()
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    pool.get_client.assert_awaited_once_with(4)
+    pool.login_email_protector.resume_waiting_email.assert_awaited_once_with(92, "client")
