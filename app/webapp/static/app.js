@@ -451,7 +451,11 @@ function renderAccountDetail(account) {
       </div></details>
       <details class="detail-section"><summary>隐私设置 <span class="muted">已保存 ${privacyCount} 项</span></summary><div class="detail-section-body"><form id="privacyForm" class="form"><div class="split"><label><span>隐私项</span><select name="key"><option value="phone">手机号</option><option value="last_seen">在线时间</option><option value="profile_photo">头像</option><option value="forwards">转发来源</option><option value="calls">通话</option><option value="groups">拉群</option></select></label><label><span>允许范围</span><select name="rule"><option value="everybody">所有人</option><option value="contacts">联系人</option><option value="nobody">没有人</option></select></label></div><button class="primary-button" type="submit">保存该项隐私</button></form></div></details>
       <details class="detail-section"><summary>两步验证（2FA）</summary><div class="detail-section-body"><form id="twofaForm" class="form"><label><span>操作</span><select name="action"><option value="check">查询状态</option><option value="set">设置 2FA</option><option value="change">修改 2FA</option><option value="email">配置 2FA 邮箱</option><option value="disable">关闭 2FA</option><option value="confirm">确认邮箱验证码</option></select></label><div class="split"><label><span>当前密码</span><input name="current_password" type="password" autocomplete="current-password" /></label><label><span>新密码</span><input name="new_password" type="password" autocomplete="new-password" /></label></div><div class="split"><label><span>密码提示</span><input name="hint" /></label><label><span>恢复邮箱</span><input name="email" type="email" /></label></div><label><span>邮箱验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><button class="primary-button" type="submit">执行 2FA 操作</button></form></div></details>
-      <details class="detail-section"><summary>登录邮箱</summary><div class="detail-section-body"><form id="loginEmailForm" class="form"><label><span>新登录邮箱</span><input name="email" type="email" /></label><label><span>邮箱验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><div class="button-row"><button class="secondary-button" type="submit" data-action="send">发送验证码</button><button class="primary-button" type="submit" data-action="confirm">确认验证码</button></div></form></div></details>
+      <details class="detail-section"><summary>登录邮箱保护</summary><div class="detail-section-body">
+        <form id="loginEmailWindowForm" class="form"><label><span>收到登录通知后等待时长（小时）</span><input name="hours" type="number" min="0" max="720" step="1" required value="${account.login_email_window_hours ?? 0}" /></label><p class="muted">填 0 表示立即换绑；每个账号独立设置。修改后从下一条登录通知生效，当前已开始的窗口不变。</p><button class="primary-button" type="submit">保存保护时长</button></form>
+        <div class="form-divider"><span>手动换绑登录邮箱</span></div>
+        <form id="loginEmailForm" class="form"><label><span>新登录邮箱</span><input name="email" type="email" /></label><label><span>邮箱验证码</span><input name="code" inputmode="numeric" autocomplete="one-time-code" /></label><div class="button-row"><button class="secondary-button" type="submit" data-action="send">发送验证码</button><button class="primary-button" type="submit" data-action="confirm">确认验证码</button></div></form>
+      </div></details>
       <details class="detail-section"><summary>Telegram 服务消息</summary><div class="detail-section-body"><button class="secondary-button" id="loadServiceMessagesBtn" type="button">加载最近消息</button><div id="serviceMessagesList" class="list"></div></div></details>
     </div>`;
   qs(".back-button", detail).addEventListener("click", () => closeAccountDetail());
@@ -464,6 +468,7 @@ function renderAccountDetail(account) {
   qs("#avatarForm", detail).addEventListener("submit", (event) => submitAvatar(event, account.id));
   qs("#privacyForm", detail).addEventListener("submit", (event) => submitPrivacy(event, account.id));
   qs("#twofaForm", detail).addEventListener("submit", (event) => submitTwoFA(event, account.id));
+  qs("#loginEmailWindowForm", detail).addEventListener("submit", (event) => submitLoginEmailWindow(event, account.id));
   qs("#loginEmailForm", detail).addEventListener("submit", (event) => submitLoginEmail(event, account.id));
   qs("#loadServiceMessagesBtn", detail).addEventListener("click", (event) => loadServiceMessages(account.id, event.currentTarget));
 }
@@ -629,6 +634,23 @@ async function submitLoginEmail(event, accountId) {
     showNotice(data.message || "登录邮箱操作完成", data.needs_code ? "" : "ok");
   } catch (error) {
     showNotice(`登录邮箱操作失败：${error.message}`, "error");
+  } finally { setBusy(button, false); }
+}
+
+async function submitLoginEmailWindow(event, accountId) {
+  event.preventDefault();
+  const button = event.submitter;
+  const hours = Number(new FormData(event.currentTarget).get("hours"));
+  setBusy(button, true, "正在保存…");
+  try {
+    const data = await api(`/accounts/${accountId}/login-email-window`, {
+      method: "PUT",
+      body: JSON.stringify({ hours }),
+    });
+    showNotice(data.message, "ok");
+    await openAccountDetail(accountId);
+  } catch (error) {
+    showNotice(`保存保护时长失败：${error.message}`, "error");
   } finally { setBusy(button, false); }
 }
 

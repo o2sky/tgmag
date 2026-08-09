@@ -310,7 +310,19 @@ class ClientPool:
         deadline = notice.window_ends_at
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=UTC)
-        hours = max(1, settings.login_email_aggregation_seconds // 3600)
+        hours = notice.window_hours
+        if notice.starts_new_window and hours == 0:
+            return (
+                "⚡ 已触发即时登录邮箱保护\n"
+                f"当前累计：{notice.alert_count} 次\n"
+                "系统正在立即换绑登录邮箱并等待验证邮件。"
+            )
+        if not notice.starts_new_window and deadline <= datetime.now(UTC):
+            return (
+                "🔄 登录邮箱保护正在处理\n"
+                f"当前累计：{notice.alert_count} 次\n"
+                "这条新提醒已合并，本次不会重复换绑或重复发码。"
+            )
         heading = (
             f"🕗 已开启 {hours} 小时登录邮箱保护窗口"
             if notice.starts_new_window

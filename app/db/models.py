@@ -36,6 +36,12 @@ class Admin(Base):
 
 class TgAccount(Base):
     __tablename__ = "tg_accounts"
+    __table_args__ = (
+        CheckConstraint(
+            "login_email_window_hours >= 0 AND login_email_window_hours <= 720",
+            name="ck_tg_accounts_login_email_window_hours",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     phone_encrypted: Mapped[str] = mapped_column(Text)
@@ -45,6 +51,7 @@ class TgAccount(Base):
     first_name: Mapped[Optional[str]] = mapped_column(String(128))
     last_name: Mapped[Optional[str]] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(32), default="new", index=True)
+    login_email_window_hours: Mapped[int] = mapped_column(Integer, default=0)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

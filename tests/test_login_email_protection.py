@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from telethon.errors import FloodWaitError
 
 from app.config import settings
@@ -223,7 +224,8 @@ def test_incomplete_protection_events_become_retryable() -> None:
     assert session.committed is True
 
 
-def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
+@pytest.mark.parametrize("window_hours", [0, 24])
+def test_first_alert_uses_account_specific_window(monkeypatch, window_hours: int) -> None:
     detected_at = datetime.now(UTC)
 
     class Session:
@@ -244,7 +246,10 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
             if model is login_email_protection.ServiceMessage:
                 return SimpleNamespace(received_at=detected_at)
             if model is login_email_protection.TgAccount:
-                return SimpleNamespace(phone_encrypted="encrypted-phone")
+                return SimpleNamespace(
+                    phone_encrypted="encrypted-phone",
+                    login_email_window_hours=window_hours,
+                )
             return None
 
         def add(self, record):
@@ -268,7 +273,6 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
     protector._account_locks = {}
     protector._notify = AsyncMock()
     monkeypatch.setattr(settings, "login_email_protection_enabled", True)
-    monkeypatch.setattr(settings, "login_email_aggregation_seconds", 86400)
     monkeypatch.setattr(
         login_email_protection,
         "get_selected_domain",
@@ -280,12 +284,15 @@ def test_first_alert_starts_fixed_aggregation_window(monkeypatch) -> None:
     assert notice is not None
     assert notice.event_id == 91
     assert notice.starts_new_window is True
+    assert notice.window_hours == window_hours
     assert notice.alert_count == 1
     assert session.scalar_calls == 2
     assert session.added.status == "waiting_window"
     assert session.added.alert_count == 1
     assert session.added.detected_at == detected_at
-    assert session.added.window_ends_at == detected_at + login_email_protection.timedelta(hours=24)
+    assert session.added.window_ends_at == detected_at + login_email_protection.timedelta(
+        hours=window_hours
+    )
     protector._notify.assert_not_awaited()
 
 
@@ -296,6 +303,7 @@ def test_alerts_inside_window_are_merged_without_extending_it(monkeypatch) -> No
     active_window = SimpleNamespace(
         id=91,
         alert_count=1,
+        detected_at=first_at,
         last_detected_at=first_at,
         window_ends_at=window_ends_at,
     )
@@ -349,6 +357,7 @@ def test_alerts_inside_window_are_merged_without_extending_it(monkeypatch) -> No
     assert notice.event_id == 91
     assert notice.starts_new_window is False
     assert notice.alert_count == 2
+    assert notice.window_hours == 8
     assert notice.window_ends_at == window_ends_at
     assert session.added.status == "merged"
     assert session.added.parent_event_id == 91

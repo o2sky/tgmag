@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     login_email_poll_timeout_seconds: int = Field(default=300, ge=30, le=7200, alias="LOGIN_EMAIL_POLL_TIMEOUT_SECONDS")
     login_email_poll_interval_seconds: int = Field(default=3, ge=1, le=30, alias="LOGIN_EMAIL_POLL_INTERVAL_SECONDS")
     login_email_catchup_seconds: int = Field(default=180, ge=0, le=3600, alias="LOGIN_EMAIL_CATCHUP_SECONDS")
-    login_email_aggregation_seconds: int = Field(default=86400, ge=1, le=86400, alias="LOGIN_EMAIL_AGGREGATION_SECONDS")
 
     @field_validator("admin_ids", mode="before")
     @classmethod

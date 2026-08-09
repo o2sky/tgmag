@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telethon import TelegramClient
 from telethon.errors import FloodError
@@ -88,6 +88,7 @@ class TelegramLoginEmailCode:
 class LoginEmailWindowNotice:
     event_id: int
     window_ends_at: datetime
+    window_hours: int
     alert_count: int
     starts_new_window: bool
 
@@ -600,9 +601,14 @@ class LoginEmailProtector:
                 .where(
                     LoginEmailProtectionEvent.account_id == account_id,
                     LoginEmailProtectionEvent.parent_event_id.is_(None),
-                    LoginEmailProtectionEvent.status == "waiting_window",
-                    LoginEmailProtectionEvent.detected_at <= alert_at,
-                    LoginEmailProtectionEvent.window_ends_at > alert_at,
+                    or_(
+                        LoginEmailProtectionEvent.status.in_({"requesting", "waiting_email"}),
+                        and_(
+                            LoginEmailProtectionEvent.status == "waiting_window",
+                            LoginEmailProtectionEvent.detected_at <= alert_at,
+                            LoginEmailProtectionEvent.window_ends_at > alert_at,
+                        ),
+                    ),
                 )
                 .order_by(LoginEmailProtectionEvent.window_ends_at.desc())
                 .limit(1)
@@ -622,14 +628,25 @@ class LoginEmailProtector:
                 return LoginEmailWindowNotice(
                     event_id=active_window.id,
                     window_ends_at=active_window.window_ends_at,
+                    window_hours=max(
+                        0,
+                        round(
+                            (
+                                active_window.window_ends_at - active_window.detected_at
+                            ).total_seconds()
+                            / 3600
+                        ),
+                    ),
                     alert_count=active_window.alert_count,
                     starts_new_window=False,
                 )
 
-            event.status = "waiting_window"
-            event.window_ends_at = alert_at + timedelta(
-                seconds=settings.login_email_aggregation_seconds
+            window_hours = max(
+                0,
+                min(int(getattr(account, "login_email_window_hours", 0) or 0), 720),
             )
+            event.status = "waiting_window"
+            event.window_ends_at = alert_at + timedelta(hours=window_hours)
             session.add(event)
             await session.flush()
             event_id = event.id
@@ -637,6 +654,7 @@ class LoginEmailProtector:
             return LoginEmailWindowNotice(
                 event_id=event_id,
                 window_ends_at=event.window_ends_at,
+                window_hours=window_hours,
                 alert_count=event.alert_count,
                 starts_new_window=True,
             )
@@ -737,14 +755,18 @@ class LoginEmailProtector:
                 .astimezone()
                 .strftime("%Y-%m-%d %H:%M:%S %Z")
             )
-            duration_seconds = settings.login_email_aggregation_seconds
+            duration_seconds = 0
             if event.window_ends_at is not None:
                 duration_seconds = max(
-                    1,
+                    0,
                     int((event.window_ends_at - event.detected_at).total_seconds()),
                 )
-            hours = max(1, duration_seconds // 3600)
-            return f"{hours} 小时窗口内登录提醒：{event.alert_count} 次\n首次：{first_at}\n最后：{last_at}"
+            window_label = (
+                "即时保护触发的登录提醒"
+                if duration_seconds == 0
+                else f"{duration_seconds // 3600} 小时窗口内登录提醒"
+            )
+            return f"{window_label}：{event.alert_count} 次\n首次：{first_at}\n最后：{last_at}"
 
     async def retry(
         self,

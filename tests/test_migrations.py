@@ -10,6 +10,7 @@ def test_initial_migration_matches_incremental_history() -> None:
     seventh = Path("alembic/versions/0007_login_email_aggregation_window.py").read_text(
         encoding="utf-8"
     )
+    eighth = Path("alembic/versions/0008_account_login_email_window.py").read_text(encoding="utf-8")
     assert 'sa.Column("text", sa.Text()' not in initial
     assert "uq_service_account_message" in initial
     assert 'op.add_column("service_messages"' in second
@@ -21,3 +22,6 @@ def test_initial_migration_matches_incremental_history() -> None:
     assert '"window_ends_at"' in seventh
     assert '"alert_count"' in seventh
     assert '"parent_event_id"' in seventh
+    assert '"login_email_window_hours"' in eighth
+    assert 'server_default="0"' in eighth
+    assert "login_email_window_hours >= 0 AND login_email_window_hours <= 720" in eighth

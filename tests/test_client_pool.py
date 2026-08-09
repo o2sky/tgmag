@@ -47,7 +47,7 @@ def test_existing_service_row_still_reaches_protector(monkeypatch) -> None:
     pool.sessionmaker = FakeSessionmaker(session)
     pool.bot = SimpleNamespace(send_message=AsyncMock())
     deadline = datetime.now(UTC) + timedelta(hours=24)
-    notice = LoginEmailWindowNotice(91, deadline, 1, True)
+    notice = LoginEmailWindowNotice(91, deadline, 24, 1, True)
     pool.login_email_protector = SimpleNamespace(
         record_alert=AsyncMock(return_value=notice),
         wait_for_window=AsyncMock(),
@@ -55,7 +55,6 @@ def test_existing_service_row_still_reaches_protector(monkeypatch) -> None:
     pool._service_message_locks = {}
     pool._protection_tasks = set()
     pool._is_post_session_login_alert = AsyncMock(return_value=True)
-    monkeypatch.setattr(settings, "login_email_aggregation_seconds", 86400)
 
     client = object()
 
@@ -116,8 +115,8 @@ def test_initial_manual_login_alert_is_stored_without_protection() -> None:
 
 def test_each_login_notification_includes_current_window_status(monkeypatch) -> None:
     text = "Login code: 97588. Do not give this code to anyone."
-    deadline = datetime(2026, 8, 6, 10, 47, 14, tzinfo=UTC)
-    notice = LoginEmailWindowNotice(91, deadline, 3, False)
+    deadline = datetime.now(UTC) + timedelta(hours=24)
+    notice = LoginEmailWindowNotice(91, deadline, 24, 3, False)
 
     class Session:
         record = None
@@ -169,6 +168,16 @@ def test_each_login_notification_includes_current_window_status(monkeypatch) -> 
     assert "当前累计：3 次" in sent_text
     assert "截止时间：" in sent_text
     assert "不换绑且不顺延" in sent_text
+
+
+def test_alert_during_immediate_change_is_merged_without_duplicate_request() -> None:
+    notice = LoginEmailWindowNotice(91, datetime.now(UTC), 0, 2, False)
+
+    text = ClientPool._window_notice_text(notice)
+
+    assert "正在处理" in text
+    assert "当前累计：2 次" in text
+    assert "不会重复换绑或重复发码" in text
 
 
 def test_only_login_alerts_after_active_session_are_protected() -> None:

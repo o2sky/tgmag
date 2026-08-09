@@ -2169,6 +2169,7 @@ async def login_email_account_view(
     text = (
         f"账号 #{account.id} 登录邮箱保护\n"
         f"手机号：{account.phone_masked}\n"
+        f"通知后等待：{'即时换绑' if account.login_email_window_hours == 0 else f'{account.login_email_window_hours} 小时'}\n"
         f"白名单：{'是，仅转发通知' if whitelisted else '否，允许自动换绑'}"
     )
     return text, login_email_account_panel(account_id, whitelisted)

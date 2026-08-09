@@ -130,9 +130,23 @@ def account_payload(account: TgAccount) -> dict[str, Any]:
         "last_name": account.last_name,
         "name": " ".join(part for part in [account.first_name, account.last_name] if part) or "",
         "status": account.status,
+        "login_email_window_hours": account.login_email_window_hours,
         "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
         "last_error": account.last_error,
     }
+
+
+def parse_login_email_window_hours(raw_hours: Any) -> int:
+    if isinstance(raw_hours, bool):
+        raise ValueError("时长必须是 0–720 之间的整数小时")
+    try:
+        numeric_hours = float(raw_hours)
+        hours = int(numeric_hours)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("时长必须是 0–720 之间的整数小时") from exc
+    if not numeric_hours.is_integer() or not 0 <= hours <= 720:
+        raise ValueError("时长必须是 0–720 之间的整数小时")
+    return hours
 
 
 def login_payload_key(user_id: int, login_id: str) -> str:
@@ -1126,6 +1140,40 @@ async def api_account_login_email(request: web.Request) -> web.Response:
     raise web.HTTPBadRequest(text="unsupported login email action")
 
 
+async def api_account_login_email_window(request: web.Request) -> web.Response:
+    user = await authenticated(request)
+    sessionmaker = request.app["sessionmaker"]
+    account_id = int(request.match_info["account_id"])
+    data = await request.json()
+    try:
+        hours = parse_login_email_window_hours(data.get("hours"))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+    async with sessionmaker() as session:
+        account = await session.get(TgAccount, account_id)
+        if account is None:
+            raise web.HTTPNotFound(text="account not found")
+        account.login_email_window_hours = hours
+        admin = await session.scalar(select(Admin).where(Admin.telegram_user_id == user.id))
+        await audit(
+            session,
+            admin,
+            "webapp_login_email_window_update",
+            "account",
+            str(account_id),
+            {"hours": hours},
+        )
+        await session.commit()
+    behavior = "收到登录通知后立即换绑" if hours == 0 else f"收到登录通知 {hours} 小时后换绑"
+    return web.json_response(
+        {
+            "ok": True,
+            "hours": hours,
+            "message": f"账号 #{account_id} 已设置为：{behavior}；已开始的窗口不受影响",
+        }
+    )
+
+
 async def api_account_service_messages(request: web.Request) -> web.Response:
     await authenticated(request)
     sessionmaker = request.app["sessionmaker"]
@@ -1456,6 +1504,10 @@ async def create_webapp(
     app.router.add_post("/mini-app/api/accounts/{account_id:\\d+}/twofa", api_account_twofa)
     app.router.add_post(
         "/mini-app/api/accounts/{account_id:\\d+}/login-email", api_account_login_email
+    )
+    app.router.add_put(
+        "/mini-app/api/accounts/{account_id:\\d+}/login-email-window",
+        api_account_login_email_window,
     )
     app.router.add_get(
         "/mini-app/api/accounts/{account_id:\\d+}/service-messages", api_account_service_messages

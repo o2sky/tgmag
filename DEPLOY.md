@@ -145,9 +145,8 @@ LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | `300`，等待 catch-all 转发验证码；允许 30–7200 秒，等待期间不会重复发码 |
 | `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，IMAP 轮询间隔；允许 1–30 秒 |
 | `LOGIN_EMAIL_CATCHUP_SECONDS` | 否 | `180`，服务重连时补拉近期登录提醒的时间窗口 |
-| `LOGIN_EMAIL_AGGREGATION_SECONDS` | 否 | `86400`，同账号登录提醒固定聚合窗口（24 小时） |
 
-同一账号收到第一条有效登录提醒后开始固定 24 小时窗口。窗口内的新提醒仍逐条转发给管理员，只累计次数且不会延长窗口；到期后立即执行一次登录邮箱换绑并发送包含次数、首次和末次时间的汇总结果。服务重启后会从数据库恢复尚未结束的窗口。catch-all 转发可能延迟，系统在等待期内保持“等待邮件”状态且不会重复发码，避免触发 Telegram 尝试次数限制。
+每个 TG 账号的等待窗口在 Mini App 账号详情的“登录邮箱保护”中独立设置，单位为整数小时，允许 `0–720`，默认 `0`（收到有效登录提醒后立即换绑）。大于 `0` 时，窗口内的新提醒仍逐条转发给管理员，只累计次数且不会延长窗口；到期后执行一次换绑并发送汇总结果。修改只影响之后的新窗口，服务重启后会恢复尚未结束的窗口。catch-all 转发可能延迟，系统在等待邮件期间不会重复发码，避免触发 Telegram 尝试次数限制。
 
 ## 5. 生成并保管 Fernet 密钥
 
@@ -302,7 +301,6 @@ LOGIN_EMAIL_SENDER=noreply@telegram.org
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=300
 LOGIN_EMAIL_POLL_INTERVAL_SECONDS=3
 LOGIN_EMAIL_CATCHUP_SECONDS=180
-LOGIN_EMAIL_AGGREGATION_SECONDS=86400
 ```
 
 应用专用密码中即使带空格，程序也会在读取时移除空白。保存后重启服务：
