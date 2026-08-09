@@ -20,9 +20,9 @@
 
 * { box-sizing: border-box; }
 html { min-height: 100%; background: var(--bg); }
-body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+body { margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; overscroll-behavior-y: none; }
 button, input, textarea, select { font: inherit; }
-button { color: inherit; }
+button { color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 25%, transparent); outline-offset: 1px; }
 
 .app-layout { min-height: 100vh; }
@@ -219,6 +219,10 @@ button:disabled { opacity: .55; cursor: wait; }
   .metric { min-height: 105px; padding: 14px; }
   .metric strong { font-size: 25px; }
   .split { grid-template-columns: 1fr; }
+  input, textarea, select { font-size: 16px; }
+  details.detail-section > summary { min-height: 54px; padding: 15px 16px; }
+  .detail-section-body { padding: 16px; }
+  .primary-button, .secondary-button { min-height: 44px; }
   .button-row { display: grid; grid-template-columns: 1fr 1fr; }
   .compact-form { grid-template-columns: 1fr; }
   .searchbar .secondary-button { padding-inline: 10px; }

@@ -52,6 +52,8 @@ def test_mini_app_reads_telegram_auth_at_request_time() -> None:
     source = Path("app/webapp/static/app.js").read_text(encoding="utf-8")
     assert "function telegramInitData" in source
     assert "const initData = tg?.initData" not in source
+    assert "sessionStorage.setItem(INIT_DATA_SESSION_KEY" in source
+    assert "waitForTelegramInitData(timeoutMs = 10000)" in source
 
 
 def test_mini_app_value_errors_become_bad_requests() -> None:

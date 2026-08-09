@@ -1,4 +1,5 @@
 const tg = window.Telegram?.WebApp;
+const INIT_DATA_SESSION_KEY = "tgmag.telegramInitData";
 const state = {
   bootstrap: null,
   activeView: "dashboard",
@@ -12,15 +13,21 @@ const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function telegramInitData() {
   const sdkValue = window.Telegram?.WebApp?.initData;
-  if (sdkValue) return sdkValue;
+  let hashValue = "";
   try {
-    return new URLSearchParams(window.location.hash.replace(/^#/, "")).get("tgWebAppData") || "";
+    hashValue = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("tgWebAppData") || "";
   } catch (_) {
-    return "";
+    hashValue = "";
   }
+  const freshValue = sdkValue || hashValue;
+  if (freshValue) {
+    try { window.sessionStorage.setItem(INIT_DATA_SESSION_KEY, freshValue); } catch (_) { /* unavailable */ }
+    return freshValue;
+  }
+  try { return window.sessionStorage.getItem(INIT_DATA_SESSION_KEY) || ""; } catch (_) { return ""; }
 }
 
-async function waitForTelegramInitData(timeoutMs = 1500) {
+async function waitForTelegramInitData(timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   let value = telegramInitData();
   while (!value && Date.now() < deadline) {
@@ -109,7 +116,12 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    if (response.status === 401) {
+      try { window.sessionStorage.removeItem(INIT_DATA_SESSION_KEY); } catch (_) { /* unavailable */ }
+    }
+    const error = new Error(text || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -270,10 +282,11 @@ function renderRates(rates) {
 }
 
 async function loadBootstrap({ quiet = false } = {}) {
+  if (!quiet) showNotice("正在读取 Telegram 安全登录信息…");
   const initData = await waitForTelegramInitData();
   if (!initData) {
     const message = tg
-      ? "Telegram 未提供登录信息。请关闭此页，再从机器人资料页的“打开应用”按钮进入。"
+      ? "Telegram 未提供登录信息。可先点击右上角刷新重试；仍失败时，请完全关闭此页后再从机器人的“打开”按钮进入。"
       : "当前页面缺少 Telegram 安全登录信息，请从机器人资料页的“打开应用”按钮进入。";
     showNotice(message, "error");
     return;
@@ -287,7 +300,10 @@ async function loadBootstrap({ quiet = false } = {}) {
     if (!quiet) showNotice("");
     loadJobs();
   } catch (error) {
-    showNotice(`加载失败：${error.message}`, "error");
+    const detail = error.status === 401
+      ? "Telegram 登录信息已过期，请完全关闭后从机器人的“打开”按钮重新进入"
+      : error.message;
+    showNotice(`加载失败：${detail}`, "error");
   } finally {
     refresh.classList.remove("busy");
   }
