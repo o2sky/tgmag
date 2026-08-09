@@ -19,7 +19,11 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="系统状态"), KeyboardButton(text="账号管理")],
-            [KeyboardButton(text="登录账号"), KeyboardButton(text="导入Session"), KeyboardButton(text="导出Session")],
+            [
+                KeyboardButton(text="登录账号"),
+                KeyboardButton(text="导入Session"),
+                KeyboardButton(text="导出Session"),
+            ],
             [KeyboardButton(text="批量导入Session"), KeyboardButton(text="批量任务")],
             [KeyboardButton(text="目标与速率"), KeyboardButton(text="安全防护")],
             [KeyboardButton(text="监控中心")],
@@ -36,12 +40,14 @@ def cancel_inline() -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text="取消当前操作", callback_data="flow:cancel")]]
     )
 
+
 def force_reply(placeholder: str) -> ForceReply:
     return ForceReply(
         force_reply=True,
         input_field_placeholder=placeholder,
         selective=True,
     )
+
 
 def mini_app_panel() -> InlineKeyboardMarkup | None:
     mini_app_url = settings.mini_app_public_url.strip()
@@ -79,7 +85,13 @@ def account_button_label(account: TgAccount) -> str:
 def accounts_panel(accounts: list[TgAccount]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for account in accounts[:20]:
-        rows.append([InlineKeyboardButton(text=account_button_label(account), callback_data=f"acct:{account.id}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=account_button_label(account), callback_data=f"acct:{account.id}"
+                )
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(text="刷新", callback_data="nav:accounts"),
@@ -93,24 +105,42 @@ def account_actions_panel(account_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="重连", callback_data=f"acct_action:reconnect:{account_id}"),
-                InlineKeyboardButton(text="SpamBot", callback_data=f"acct_action:spam:{account_id}"),
+                InlineKeyboardButton(
+                    text="重连", callback_data=f"acct_action:reconnect:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="SpamBot", callback_data=f"acct_action:spam:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="详细信息", callback_data=f"acct_action:detail:{account_id}"),
-                InlineKeyboardButton(text="刷新检测", callback_data=f"acct_action:check_detail:{account_id}"),
+                InlineKeyboardButton(
+                    text="详细信息", callback_data=f"acct_action:detail:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="刷新检测", callback_data=f"acct_action:check_detail:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="拉取777000", callback_data=f"acct_action:service:{account_id}"),
+                InlineKeyboardButton(
+                    text="拉取777000", callback_data=f"acct_action:service:{account_id}"
+                ),
                 InlineKeyboardButton(text="2FA", callback_data=f"acct_action:twofa:{account_id}"),
             ],
             [
-                InlineKeyboardButton(text="隐私快照", callback_data=f"acct_action:privacy:{account_id}"),
-                InlineKeyboardButton(text="资料设置", callback_data=f"acct_panel:profile:{account_id}"),
+                InlineKeyboardButton(
+                    text="隐私快照", callback_data=f"acct_action:privacy:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="资料设置", callback_data=f"acct_panel:profile:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="隐私设置", callback_data=f"acct_panel:privacy:{account_id}"),
-                InlineKeyboardButton(text="2FA 设置", callback_data=f"acct_panel:twofa:{account_id}"),
+                InlineKeyboardButton(
+                    text="隐私设置", callback_data=f"acct_panel:privacy:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="2FA 设置", callback_data=f"acct_panel:twofa:{account_id}"
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -119,7 +149,9 @@ def account_actions_panel(account_id: int) -> InlineKeyboardMarkup:
                 )
             ],
             [
-                InlineKeyboardButton(text="导出 Session", callback_data=f"acct_action:export_session:{account_id}"),
+                InlineKeyboardButton(
+                    text="导出 Session", callback_data=f"acct_action:export_session:{account_id}"
+                ),
             ],
             [
                 InlineKeyboardButton(text="返回列表", callback_data="nav:accounts"),
@@ -153,8 +185,12 @@ def profile_edit_panel(account_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="改简介", callback_data=f"acct_edit:bio:{account_id}"),
             ],
             [
-                InlineKeyboardButton(text="改用户名", callback_data=f"acct_edit:username:{account_id}"),
-                InlineKeyboardButton(text="头像设置", callback_data=f"acct_panel:avatar:{account_id}"),
+                InlineKeyboardButton(
+                    text="改用户名", callback_data=f"acct_edit:username:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="头像设置", callback_data=f"acct_panel:avatar:{account_id}"
+                ),
             ],
             [InlineKeyboardButton(text="返回账号", callback_data=f"acct:{account_id}")],
         ]
@@ -165,10 +201,18 @@ def avatar_panel(account_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="上传图片", callback_data=f"acct_edit:avatar_upload:{account_id}"),
-                InlineKeyboardButton(text="随机头像", callback_data=f"acct_action:avatar_random:{account_id}"),
+                InlineKeyboardButton(
+                    text="上传图片", callback_data=f"acct_edit:avatar_upload:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="随机头像", callback_data=f"acct_action:avatar_random:{account_id}"
+                ),
             ],
-            [InlineKeyboardButton(text="返回资料", callback_data=f"acct_panel:profile:{account_id}")],
+            [
+                InlineKeyboardButton(
+                    text="返回资料", callback_data=f"acct_panel:profile:{account_id}"
+                )
+            ],
         ]
     )
 
@@ -177,12 +221,20 @@ def privacy_keys_panel(account_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="手机号", callback_data=f"privacy_key:phone:{account_id}"),
-                InlineKeyboardButton(text="在线时间", callback_data=f"privacy_key:last_seen:{account_id}"),
+                InlineKeyboardButton(
+                    text="手机号", callback_data=f"privacy_key:phone:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="在线时间", callback_data=f"privacy_key:last_seen:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="头像", callback_data=f"privacy_key:profile_photo:{account_id}"),
-                InlineKeyboardButton(text="转发来源", callback_data=f"privacy_key:forwards:{account_id}"),
+                InlineKeyboardButton(
+                    text="头像", callback_data=f"privacy_key:profile_photo:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="转发来源", callback_data=f"privacy_key:forwards:{account_id}"
+                ),
             ],
             [
                 InlineKeyboardButton(text="通话", callback_data=f"privacy_key:calls:{account_id}"),
@@ -197,11 +249,17 @@ def privacy_rules_panel(account_id: int, key_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="所有人", callback_data=f"privacy_set:{key_name}:everybody:{account_id}"),
-                InlineKeyboardButton(text="联系人", callback_data=f"privacy_set:{key_name}:contacts:{account_id}"),
+                InlineKeyboardButton(
+                    text="所有人", callback_data=f"privacy_set:{key_name}:everybody:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="联系人", callback_data=f"privacy_set:{key_name}:contacts:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="没有人", callback_data=f"privacy_set:{key_name}:nobody:{account_id}"),
+                InlineKeyboardButton(
+                    text="没有人", callback_data=f"privacy_set:{key_name}:nobody:{account_id}"
+                ),
                 InlineKeyboardButton(text="返回", callback_data=f"acct_panel:privacy:{account_id}"),
             ],
         ]
@@ -212,15 +270,23 @@ def twofa_panel(account_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="查询状态", callback_data=f"acct_action:twofa:{account_id}"),
+                InlineKeyboardButton(
+                    text="查询状态", callback_data=f"acct_action:twofa:{account_id}"
+                ),
                 InlineKeyboardButton(text="设置 2FA", callback_data=f"twofa_edit:set:{account_id}"),
             ],
             [
-                InlineKeyboardButton(text="修改 2FA", callback_data=f"twofa_edit:change:{account_id}"),
-                InlineKeyboardButton(text="配置邮箱", callback_data=f"twofa_edit:email:{account_id}"),
+                InlineKeyboardButton(
+                    text="修改 2FA", callback_data=f"twofa_edit:change:{account_id}"
+                ),
+                InlineKeyboardButton(
+                    text="配置邮箱", callback_data=f"twofa_edit:email:{account_id}"
+                ),
             ],
             [
-                InlineKeyboardButton(text="关闭 2FA", callback_data=f"twofa_edit:disable:{account_id}"),
+                InlineKeyboardButton(
+                    text="关闭 2FA", callback_data=f"twofa_edit:disable:{account_id}"
+                ),
                 InlineKeyboardButton(text="返回账号", callback_data=f"acct:{account_id}"),
             ],
         ]
@@ -292,7 +358,11 @@ def login_email_guard_panel() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="最近保护事件", callback_data="emailguard:events"),
                 InlineKeyboardButton(text="检查 Gmail", callback_data="emailguard:testimap"),
             ],
-            [InlineKeyboardButton(text="检测整个安全防护链路", callback_data="emailguard:checkall")],
+            [
+                InlineKeyboardButton(
+                    text="检测整个安全防护链路", callback_data="emailguard:checkall"
+                )
+            ],
             [InlineKeyboardButton(text="刷新", callback_data="emailguard:open")],
             [InlineKeyboardButton(text="返回主菜单", callback_data="nav:home")],
         ]
@@ -387,6 +457,12 @@ def login_email_account_panel(account_id: int, whitelisted: bool) -> InlineKeybo
     label = "移出白名单" if whitelisted else "加入白名单"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="设置等待时间",
+                    callback_data=f"emailguard:window:{account_id}",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=label,

@@ -65,6 +65,7 @@ from app.bot.states import (
     ImportSessionsFlow,
     LoginFlow,
     LoginEmailDomainFlow,
+    LoginEmailWindowFlow,
     ProfileEditFlow,
     TwoFAEditFlow,
 )
@@ -94,6 +95,7 @@ from app.services.login_email_protection import (
     get_selected_domain,
     get_whitelist_ids,
     login_email_wait_remaining,
+    parse_login_email_window_hours,
     set_selected_domain,
     set_whitelisted,
 )
@@ -2217,6 +2219,24 @@ async def login_email_guard_callback(
             text, panel = await login_email_events_view(session)
         elif action == "account" and len(parts) == 3:
             text, panel = await login_email_account_view(session, int(parts[2]))
+        elif action == "window" and len(parts) == 3:
+            account_id = int(parts[2])
+            account = await session.get(TgAccount, account_id)
+            if account is None:
+                await callback.answer("账号不存在", show_alert=True)
+                return
+            await state.set_state(LoginEmailWindowFlow.value)
+            await state.update_data(account_id=account_id)
+            await ask_callback_with_cancel(
+                callback,
+                (
+                    f"账号 #{account_id} 当前为 "
+                    f"{'0 小时（收到通知后立即换绑）' if account.login_email_window_hours == 0 else f'{account.login_email_window_hours} 小时'}。\n"
+                    "请输入新的等待小时数，允许 0–720 的整数。"
+                ),
+                "例如 0、8 或 24",
+            )
+            return
         elif action == "domain" and len(parts) == 3:
             domains = await get_available_domains(session)
             try:
@@ -2374,6 +2394,53 @@ async def login_email_domain_add(
         return
     await state.clear()
     await message.answer(f"已添加 @{added}\n\n{text}", reply_markup=panel)
+
+
+@router.message(LoginEmailWindowFlow.value)
+async def login_email_window_update(
+    message: Message,
+    state: FSMContext,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    try:
+        hours = parse_login_email_window_hours((message.text or "").strip())
+    except ValueError as exc:
+        await ask_with_cancel(
+            message,
+            f"设置失败：{exc}\n请重新输入。",
+            "例如 0、8 或 24",
+        )
+        return
+    data = await state.get_data()
+    account_id = int(data.get("account_id") or 0)
+    async with sessionmaker() as session:
+        account = await session.get(TgAccount, account_id)
+        if account is None:
+            await state.clear()
+            await message.answer("账号不存在，设置已取消。")
+            return
+        account.login_email_window_hours = hours
+        admin = None
+        if message.from_user is not None:
+            admin = await session.scalar(
+                select(Admin).where(Admin.telegram_user_id == message.from_user.id)
+            )
+        await audit(
+            session,
+            admin,
+            "bot_login_email_window_update",
+            "account",
+            str(account_id),
+            {"hours": hours},
+        )
+        await session.commit()
+        text, panel = await login_email_account_view(session, account_id)
+    await state.clear()
+    behavior = "收到登录通知后立即换绑" if hours == 0 else f"收到登录通知 {hours} 小时后换绑"
+    await message.answer(
+        f"已保存：{behavior}。已开始的窗口不受影响。\n\n{text}",
+        reply_markup=panel,
+    )
 
 
 @router.callback_query(F.data.startswith("template:"))

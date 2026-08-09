@@ -44,7 +44,11 @@ from app.db.models import (
 from app.services.audit import audit
 from app.services.crypto import decrypt_text, encrypt_text
 from app.services.jobs import add_job_item, create_job, finish_job
-from app.services.login_email_protection import format_wait_deadline, login_email_wait_remaining
+from app.services.login_email_protection import (
+    format_wait_deadline,
+    login_email_wait_remaining,
+    parse_login_email_window_hours,
+)
 from app.services.rate_limit import RateGate, get_rate, validate_rate_values
 from app.services.security_health import SecurityHealthReport, run_security_health_check
 from app.services.targets import canonicalize_target_ref, require_allowed_target
@@ -134,19 +138,6 @@ def account_payload(account: TgAccount) -> dict[str, Any]:
         "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
         "last_error": account.last_error,
     }
-
-
-def parse_login_email_window_hours(raw_hours: Any) -> int:
-    if isinstance(raw_hours, bool):
-        raise ValueError("时长必须是 0–720 之间的整数小时")
-    try:
-        numeric_hours = float(raw_hours)
-        hours = int(numeric_hours)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("时长必须是 0–720 之间的整数小时") from exc
-    if not numeric_hours.is_integer() or not 0 <= hours <= 720:
-        raise ValueError("时长必须是 0–720 之间的整数小时")
-    return hours
 
 
 def login_payload_key(user_id: int, login_id: str) -> str:

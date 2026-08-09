@@ -123,6 +123,19 @@ def login_email_wait_remaining(
     )
 
 
+def parse_login_email_window_hours(raw_hours: object) -> int:
+    if isinstance(raw_hours, bool):
+        raise ValueError("时长必须是 0–720 之间的整数小时")
+    try:
+        numeric_hours = float(raw_hours)
+        hours = int(numeric_hours)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("时长必须是 0–720 之间的整数小时") from exc
+    if not numeric_hours.is_integer() or not 0 <= hours <= 720:
+        raise ValueError("时长必须是 0–720 之间的整数小时")
+    return hours
+
+
 def is_login_code_alert(text: str) -> bool:
     """Recognize the 777000 login-code alert without depending on its full wording."""
     value = text or ""

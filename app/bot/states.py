@@ -33,3 +33,7 @@ class TwoFAEditFlow(StatesGroup):
 
 class LoginEmailDomainFlow(StatesGroup):
     value = State()
+
+
+class LoginEmailWindowFlow(StatesGroup):
+    value = State()

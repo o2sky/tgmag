@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.webapp.server import parse_login_email_window_hours
+from app.services.login_email_protection import parse_login_email_window_hours
 
 
 @pytest.mark.parametrize(

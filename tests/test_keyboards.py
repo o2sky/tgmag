@@ -4,6 +4,7 @@ import pytest
 
 from app.bot.keyboards import (
     bot_menu_button,
+    login_email_account_panel,
     login_email_domains_panel,
     login_email_guard_panel,
     main_menu,
@@ -20,21 +21,14 @@ def test_main_menu_is_collapsible_and_reopenable() -> None:
 
 
 def test_project_never_sends_reply_keyboard_remove() -> None:
-    source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in Path("app").rglob("*.py")
-    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in Path("app").rglob("*.py"))
     assert "ReplyKeyboardRemove" not in source
     assert "remove_keyboard=True" not in source
     assert '"remove_keyboard": true' not in source.lower()
 
 
 def test_main_navigation_labels_are_reply_keyboard_buttons() -> None:
-    labels = {
-        button.text
-        for row in main_menu().keyboard
-        for button in row
-    }
+    labels = {button.text for row in main_menu().keyboard for button in row}
     assert labels == {
         "系统状态",
         "账号管理",
@@ -60,9 +54,7 @@ def test_native_bot_menu_opens_configured_mini_app(monkeypatch: pytest.MonkeyPat
 
 def test_security_center_separates_domains_whitelist_events_and_gmail() -> None:
     callbacks = {
-        button.callback_data
-        for row in login_email_guard_panel().inline_keyboard
-        for button in row
+        button.callback_data for row in login_email_guard_panel().inline_keyboard for button in row
     }
     assert {
         "emailguard:domains",
@@ -78,3 +70,12 @@ def test_domain_deletion_requires_confirmation() -> None:
     callbacks = [button.callback_data for row in panel.inline_keyboard for button in row]
     assert "emailguard:deleteask:0" in callbacks
     assert "emailguard:delete:0" not in callbacks
+
+
+def test_account_email_guard_has_window_setting_button() -> None:
+    callbacks = {
+        button.callback_data
+        for row in login_email_account_panel(15, False).inline_keyboard
+        for button in row
+    }
+    assert "emailguard:window:15" in callbacks
