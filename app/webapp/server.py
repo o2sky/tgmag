@@ -90,7 +90,7 @@ async def security_headers_middleware(request: web.Request, handler):
         "base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
     )
-    if request.path.startswith("/mini-app/api/"):
+    if request.path.startswith(("/mini-app/api/", "/mini-app/static/")):
         response.headers["Cache-Control"] = "no-store"
     return response
 
