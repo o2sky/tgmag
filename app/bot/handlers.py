@@ -838,7 +838,11 @@ async def login_phone(
         return
     except FloodWaitError as exc:
         await state.set_state(LoginFlow.phone)
-        await ask_with_cancel(message, f"请求过于频繁，需要等待 {exc.seconds} 秒后再试。", "+8613800000000")
+        await ask_with_cancel(
+            message,
+            f"请求过于频繁，请在 {format_wait_deadline(exc.seconds)} 后再试。",
+            "+8613800000000",
+        )
         return
     except Exception as exc:
         await state.set_state(LoginFlow.phone)
@@ -898,7 +902,11 @@ async def login_code(
         return
     except FloodWaitError as exc:
         await state.set_state(LoginFlow.code)
-        await ask_with_cancel(message, f"尝试过于频繁，需要等待 {exc.seconds} 秒后再输入验证码。", "Telegram 验证码")
+        await ask_with_cancel(
+            message,
+            f"尝试过于频繁，请在 {format_wait_deadline(exc.seconds)} 后再输入验证码。",
+            "Telegram 验证码",
+        )
         return
     except Exception as exc:
         await state.set_state(LoginFlow.code)
@@ -936,7 +944,11 @@ async def login_password(
         return
     except FloodWaitError as exc:
         await state.set_state(LoginFlow.password)
-        await ask_with_cancel(message, f"尝试过于频繁，需要等待 {exc.seconds} 秒后再输入 2FA 密码。", "2FA 密码")
+        await ask_with_cancel(
+            message,
+            f"尝试过于频繁，请在 {format_wait_deadline(exc.seconds)} 后再输入 2FA 密码。",
+            "2FA 密码",
+        )
         return
     except Exception as exc:
         await state.set_state(LoginFlow.password)

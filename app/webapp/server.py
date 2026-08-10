@@ -503,7 +503,9 @@ async def api_login_start(request: web.Request) -> web.Response:
     except PhoneNumberBannedError as exc:
         raise web.HTTPBadRequest(text="这个手机号被 Telegram 标记为不可登录/封禁") from exc
     except FloodWaitError as exc:
-        raise web.HTTPTooManyRequests(text=f"请求过于频繁，需要等待 {exc.seconds} 秒") from exc
+        raise web.HTTPTooManyRequests(
+            text=f"请求过于频繁，请在 {format_wait_deadline(exc.seconds)} 后再试"
+        ) from exc
     login_id = uuid.uuid4().hex
     request.app["pending_logins"][login_payload_key(user.id, login_id)] = {
         "client": client,
@@ -597,7 +599,9 @@ async def api_login_verify(request: web.Request) -> web.Response:
         await close_pending_login(request.app["pending_logins"].pop(key, None))
         raise web.HTTPBadRequest(text="验证码已过期，请重新开始登录") from exc
     except FloodWaitError as exc:
-        raise web.HTTPTooManyRequests(text=f"尝试过于频繁，需要等待 {exc.seconds} 秒") from exc
+        raise web.HTTPTooManyRequests(
+            text=f"尝试过于频繁，请在 {format_wait_deadline(exc.seconds)} 后再试"
+        ) from exc
     async with sessionmaker() as session:
         account = await account_ops.save_logged_in_account(
             session, pending["phone"], session_str, me, password
@@ -1072,7 +1076,10 @@ async def api_account_login_email(request: web.Request) -> web.Response:
             sent = await account_ops.send_login_email_code(client, email)
         except FloodWaitError as exc:
             raise web.HTTPTooManyRequests(
-                text=f"Telegram 限制尝试次数，需要等待 {exc.seconds} 秒；请勿连续发码"
+                text=(
+                    "Telegram 限制尝试次数，"
+                    f"请在 {format_wait_deadline(exc.seconds)} 后再试；本次未发送验证码"
+                )
             ) from exc
         except FloodError as exc:
             raise web.HTTPTooManyRequests(
@@ -1105,7 +1112,10 @@ async def api_account_login_email(request: web.Request) -> web.Response:
                 request.app["pending_login_email"][pending_key] = pending
             if isinstance(exc, FloodWaitError):
                 raise web.HTTPTooManyRequests(
-                    text=f"Telegram 限制尝试次数，需要等待 {exc.seconds} 秒"
+                    text=(
+                        "Telegram 限制尝试次数，"
+                        f"请在 {format_wait_deadline(exc.seconds)} 后再试"
+                    )
                 ) from exc
             if isinstance(exc, FloodError):
                 raise web.HTTPTooManyRequests(text="Telegram 限制尝试次数，请稍后再试") from exc

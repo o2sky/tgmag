@@ -21,6 +21,7 @@ from app.services.login_email_protection import (
     parse_telegram_login_email,
     recover_incomplete_events,
 )
+from app.tg import account_ops
 
 SAMPLE_EMAIL = b"""From: Telegram <noreply@telegram.org>
 To: testime001@mail.example.com
@@ -54,6 +55,19 @@ def test_wait_message_shows_deadline_instead_of_remaining_duration(monkeypatch) 
     assert (
         format_wait_deadline(300, now=datetime(2026, 8, 8, 15, 58, tzinfo=UTC)) == "08-09 00:03:00"
     )
+
+
+def test_login_email_calls_never_silently_sleep_on_flood_wait() -> None:
+    client = AsyncMock(return_value=SimpleNamespace(email_pattern="t***@example.com", length=6))
+
+    result = asyncio.run(account_ops.send_login_email_code(client, "test@example.com"))
+
+    assert result == {"email_pattern": "t***@example.com", "length": 6}
+    assert client.await_args.kwargs["flood_sleep_threshold"] == 0
+
+    client.reset_mock()
+    asyncio.run(account_ops.confirm_login_email(client, "123456"))
+    assert client.await_args.kwargs["flood_sleep_threshold"] == 0
 
 
 def test_login_code_alert_matches_supported_777000_wording() -> None:
@@ -420,6 +434,11 @@ def test_expired_window_immediately_runs_one_change() -> None:
 
 def test_protection_failure_reasons_explain_mail_delay_and_flood_wait(monkeypatch) -> None:
     monkeypatch.setattr(settings, "login_email_poll_timeout_seconds", 300)
+    monkeypatch.setattr(
+        login_email_protection,
+        "format_wait_deadline",
+        lambda seconds: "20:10:00",
+    )
 
     timeout_reason = LoginEmailProtector._friendly_failure_reason(
         TimeoutError("等待 Telegram 登录邮箱验证码超时")
@@ -427,10 +446,14 @@ def test_protection_failure_reasons_explain_mail_delay_and_flood_wait(monkeypatc
     flood_reason = LoginEmailProtector._friendly_failure_reason(FloodWaitError(None, 600))
 
     assert "5 分钟内未收到" in timeout_reason
-    assert "转发可能延迟" in timeout_reason
+    assert "Cloudflare Email Routing" in timeout_reason
+    assert "Gmail 421/4.7.28" in timeout_reason
+    assert "Telegram 已受理发码" in timeout_reason
+    assert "Activity" in timeout_reason
     assert "未自动重发" in timeout_reason
     assert "Telegram 限制尝试次数" in flood_reason
-    assert "600 秒" in flood_reason
+    assert "20:10:00" in flood_reason
+    assert "600 秒" not in flood_reason
 
 
 def test_resumed_email_wait_does_not_request_another_code(monkeypatch) -> None:

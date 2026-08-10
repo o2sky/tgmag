@@ -829,13 +829,19 @@ class LoginEmailProtector:
     def _friendly_failure_reason(exc: Exception) -> str:
         if isinstance(exc, FloodError):
             seconds = int(getattr(exc, "seconds", 0) or 0)
-            wait = f"至少等待 {seconds} 秒" if seconds else "请稍后再试"
-            return f"Telegram 限制尝试次数，{wait}；不要连续重新发送验证码"
+            if seconds:
+                return (
+                    f"Telegram 限制尝试次数，请在 {format_wait_deadline(seconds)} 后再试；"
+                    "本次未发送验证码，请勿连续重试"
+                )
+            return "Telegram 限制尝试次数，请稍后再试；本次未发送验证码，请勿连续重试"
         if isinstance(exc, TimeoutError):
             minutes = max(1, settings.login_email_poll_timeout_seconds // 60)
             return (
-                f"{minutes} 分钟内未收到匹配的换绑验证码邮件；catch-all 转发可能延迟，"
-                "本次请求未自动重发，请确认旧邮件不会继续延迟到达后再手动重试"
+                f"卡点：Telegram 已受理发码，但 Gmail 在 {minutes} 分钟内未收到验证码邮件。"
+                "请打开 Cloudflare Email Routing 控制台 → Activity，查看目标地址的"
+                "投递记录；若出现 Gmail 421/4.7.28，表示 Gmail 正在临时限流。"
+                "本次请求未自动重发，请等待投递恢复后再手动重试"
             )
         return str(exc)
 

@@ -231,7 +231,8 @@ async def send_login_email_code(client: TelegramClient, email: str) -> dict[str,
         functions.account.SendVerifyEmailCodeRequest(
             purpose=types.EmailVerifyPurposeLoginChange(),
             email=email,
-        )
+        ),
+        flood_sleep_threshold=0,
     )
     return {"email_pattern": sent.email_pattern, "length": sent.length}
 
@@ -241,7 +242,8 @@ async def confirm_login_email(client: TelegramClient, code: str) -> Any:
         functions.account.VerifyEmailRequest(
             purpose=types.EmailVerifyPurposeLoginChange(),
             verification=types.EmailVerificationCode(code),
-        )
+        ),
+        flood_sleep_threshold=0,
     )
 
 
