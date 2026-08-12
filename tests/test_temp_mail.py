@@ -30,15 +30,16 @@ def test_all_configured_domains_accept_arbitrary_local_parts() -> None:
 
 def test_recipient_parser_keeps_only_allowed_domains() -> None:
     assert parse_allowed_recipients(
-        "Alice <ABC@mail.085580.xyz>, attacker@example.com"
-    ) == (("abc@mail.085580.xyz", "mail.085580.xyz"),)
+        "Alice <ABC@cf-mail.example.com>, attacker@example.com",
+        {"cf-mail.example.com"},
+    ) == (("abc@cf-mail.example.com", "cf-mail.example.com"),)
 
 
 def test_recipient_parser_can_restrict_webhook_to_cloudflare_domains() -> None:
     assert parse_allowed_recipients(
-        "cf@mail.085580.xyz, gmail@yheblog.dpdns.org",
-        {"mail.085580.xyz"},
-    ) == (("cf@mail.085580.xyz", "mail.085580.xyz"),)
+        "cf@cf-mail.example.com, gmail@gmail-mail.example.net",
+        {"cf-mail.example.com"},
+    ) == (("cf@cf-mail.example.com", "cf-mail.example.com"),)
 
 
 def test_invalid_recipient_is_rejected_for_queries() -> None:
@@ -50,15 +51,15 @@ def test_temp_mail_reader_extracts_matching_telegram_code(monkeypatch) -> None:
     monkeypatch.setattr("app.config.settings.login_email_sender", "noreply@telegram.org")
     message = TempMailMessage(
         id="cloudflare-message-1",
-        recipient="abc@mail.085580.xyz",
+        recipient="abc@cf-mail.example.com",
         sender="Telegram <noreply@telegram.org>",
-        domain="mail.085580.xyz",
+        domain="cf-mail.example.com",
         subject="Your Code - 853353",
         parsed_text="Your code is: 853353. Use it to verify your email for Login.",
         received_at=datetime.now(UTC),
     )
-    assert TempMailCodeReader._extract_code(message, "abc@mail.085580.xyz") == "853353"
-    assert TempMailCodeReader._extract_code(message, "other@mail.085580.xyz") is None
+    assert TempMailCodeReader._extract_code(message, "abc@cf-mail.example.com") == "853353"
+    assert TempMailCodeReader._extract_code(message, "other@cf-mail.example.com") is None
 
 
 def test_routed_reader_selects_backend_from_target_domain(monkeypatch) -> None:
@@ -83,20 +84,20 @@ def test_routed_reader_selects_backend_from_target_domain(monkeypatch) -> None:
 
     async def exercise() -> None:
         assert (
-            await reader.wait_for_code("a@mail.085580.xyz", requested_at, 30)
+            await reader.wait_for_code("a@cf-mail.example.com", requested_at, 30)
             == "111111"
         )
         assert (
-            await reader.wait_for_code("b@yheblog.dpdns.org", requested_at, 30)
+            await reader.wait_for_code("b@gmail-mail.example.net", requested_at, 30)
             == "222222"
         )
 
     asyncio.run(exercise())
     cloudflare_reader.wait_for_code.assert_awaited_once_with(
-        "a@mail.085580.xyz", requested_at, 30
+        "a@cf-mail.example.com", requested_at, 30
     )
     gmail_reader.wait_for_code.assert_awaited_once_with(
-        "b@yheblog.dpdns.org", requested_at, 30
+        "b@gmail-mail.example.net", requested_at, 30
     )
 
 
@@ -104,7 +105,7 @@ def test_domain_backend_selection_is_persisted(monkeypatch) -> None:
     rows = {
         DOMAINS_KEY: RuntimeSetting(
             key=DOMAINS_KEY,
-            value='["mail.085580.xyz", "yheblog.dpdns.org"]',
+            value='["cf-mail.example.com", "gmail-mail.example.net"]',
         )
     }
 
@@ -130,13 +131,13 @@ def test_domain_backend_selection_is_persisted(monkeypatch) -> None:
     )
 
     async def exercise() -> None:
-        await set_domain_backend(session, "yheblog.dpdns.org", "gmail")
+        await set_domain_backend(session, "gmail-mail.example.net", "gmail")
         routes = await get_domain_backends(session)
         assert routes == {
-            "mail.085580.xyz": "cloudflare",
-            "yheblog.dpdns.org": "gmail",
+            "cf-mail.example.com": "cloudflare",
+            "gmail-mail.example.net": "gmail",
         }
 
     asyncio.run(exercise())
     assert session.committed is True
-    assert '"yheblog.dpdns.org": "gmail"' in rows[DOMAIN_BACKENDS_KEY].value
+    assert '"gmail-mail.example.net": "gmail"' in rows[DOMAIN_BACKENDS_KEY].value

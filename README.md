@@ -207,7 +207,7 @@ LOGIN_EMAIL_IMAP_FOLDER=INBOX
 
 ## TempMail / Cloudflare Temp Email 部署（Backend-only）
 
-本节记录当前已经完成真实邮件端到端验证的部署方式。目标是让多个自定义域名下的任意收件地址通过同一个 Cloudflare Worker 收信，再由 Worker 主动把邮件 POST 到 VPS，最后保存到 PostgreSQL。这里的 Cloudflare Temp Email 是上游项目 [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)。
+本节给出一套可复用的部署方式。目标是让多个自定义域名下的任意收件地址通过同一个 Cloudflare Worker 收信，再由 Worker 主动把邮件 POST 到 VPS，最后保存到 PostgreSQL。这里的 Cloudflare Temp Email 是上游项目 [dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)。
 
 > [!IMPORTANT]
 > 当前方案有意不部署 Cloudflare Pages，也不运行浏览器邮箱前端。VPS 不会定时查询 Cloudflare Worker；每封新邮件都由 Worker 主动调用 VPS Webhook。
@@ -220,7 +220,7 @@ flowchart TD
     routing -->|Catch-all| worker[Cloudflare Worker<br/>temp-mail-worker]
     worker --> d1[(Cloudflare D1<br/>TempMail 自身邮件数据)]
     worker --> kv[(Cloudflare KV<br/>Webhook 配置)]
-    worker -->|HTTPS POST<br/>X-Temp-Mail-Secret| webhook[https://cliapi.085580.xyz/webhooks/temp-mail]
+    worker -->|HTTPS POST<br/>X-Temp-Mail-Secret| webhook[https://bot.example.com/webhooks/temp-mail]
     webhook --> apache[Apache HTTPS Reverse Proxy]
     apache --> aiohttp[Python aiohttp]
     aiohttp --> sqlalchemy[SQLAlchemy / asyncpg]
@@ -237,32 +237,29 @@ flowchart TD
 - **PostgreSQL 邮件存储** 使用 `temp_mail_messages` 表保存 VPS 侧副本，供登录邮箱保护及其他 VPS 程序查询。
 - VPS 根据 Webhook JSON 的 `to` 字段解析完整收件地址和域名，不轮询 Worker，也不依赖 Webhook 的 `url` 字段。
 
-### 2. 当前部署信息
+### 2. 配置参数示例
 
-| 项目 | 当前值 |
+| 项目 | 示例值或约定 |
 | --- | --- |
 | Worker 名称 | `temp-mail-worker` |
-| Worker URL | `https://temp-mail-worker.hey-04138714.workers.dev` |
-| 已验证上游版本 | `v1.10.0` |
+| Worker URL | `https://temp-mail-worker.<YOUR_ACCOUNT_SUBDOMAIN>.workers.dev` |
+| Worker 版本 | 选择上游 Release，并让 `worker.js`、D1 schema/migration 保持同一版本 |
 | 上游项目 | `dreamhunter2333/cloudflare_temp_email` |
 | D1 数据库名称 | `temp-mail` |
 | D1 Worker Binding | `DB`（必须大写） |
 | KV Namespace | `temp-mail-kv` |
 | KV Worker Binding | `KV`（必须大写） |
-| VPS Webhook | `https://cliapi.085580.xyz/webhooks/temp-mail` |
+| VPS Webhook | `https://bot.example.com/webhooks/temp-mail` |
 | VPS 邮件表 | `temp_mail_messages` |
 
-当前 Cloudflare Temp Email Worker 和 VPS 候选列表包含以下 5 个域名；只有在 Telegram 中选择 `CF TempMail` 且邮件侧 Catch-all 指向 Worker 的域名才走本节链路：
+本文统一使用保留的示例域名，不代表任何真实部署：
 
 ```text
-mail.085580.xyz
-yheblog.dpdns.org
-maaqidahusymuni.eu.org
-yhewall.dpdns.org
-yhedesk.dpdns.org
+mail.example.com
+mail-alt.example.net
 ```
 
-`085580.xyz` 是托管在 Cloudflare 的主 Zone，实际 TempMail 收件域是子域 `mail.085580.xyz`。必须针对这个子域单独启用 Email Routing；父域启用不代表子域自动可收信。
+只有在 Telegram 中选择 `CF TempMail` 且邮件侧 Catch-all 指向 Worker 的域名才走本节链路。部署时把所有 `example.com`、`example.net` 和 `<...>` 替换成自己的值，不要把生产域名、Worker URL、Webhook URL 或 secret 回填到公开文档。
 
 ### 3. 准备条件
 
@@ -301,7 +298,7 @@ Storage & Databases
 temp-mail
 ```
 
-然后进入 `temp-mail → Console`，从与 Worker 相同版本的上游代码取得 [`db/schema.sql`](https://github.com/dreamhunter2333/cloudflare_temp_email/blob/v1.10.0/db/schema.sql)，完整执行其中 SQL。初始化成功后再继续部署 Worker。
+然后进入 `temp-mail → Console`，从与 Worker 相同版本的上游 Release 源码取得 `db/schema.sql`，完整执行其中 SQL。初始化成功后再继续部署 Worker。
 
 > [!WARNING]
 > `schema.sql` 用于首次初始化。升级已有实例时不要无脑重新初始化 D1；应先阅读目标版本的 [Release](https://github.com/dreamhunter2333/cloudflare_temp_email/releases) 和 [CHANGELOG](https://github.com/dreamhunter2333/cloudflare_temp_email/blob/main/CHANGELOG.md)，确认 Breaking Changes 及对应 migration SQL。
@@ -342,7 +339,7 @@ add_nodejs_compat_eol
 remove_nodejs_compat_eol
 ```
 
-本次部署时，新版 Cloudflare Dashboard 的 Compatibility flags 下拉框没有正常提供基础 `nodejs_compat`，因此采用 Wrangler 部署。先登录：
+Dashboard 对 Compatibility Flag 的展示可能变化，使用 Wrangler 部署更容易复现配置。先登录：
 
 ```cmd
 npx wrangler login
@@ -359,14 +356,14 @@ curl.exe -L https://github.com/dreamhunter2333/cloudflare_temp_email/releases/la
 dir worker.js
 ```
 
-`latest` 当前指向本次验证的 `v1.10.0`；以后它可能变化。若要严格复刻当前实例，应把 URL 中的 `latest/download` 改为 `download/v1.10.0`，并同时使用该版本的 D1 schema/migration。
+`latest` 会随上游发布变化。生产环境建议先阅读 Release/CHANGELOG，再固定目标版本，并确保 `worker.js` 与 D1 schema/migration 来自同一个版本。
 
 ### 8. 使用 Wrangler 部署 Worker
 
-本次已验证成功的命令：
+部署命令示例：
 
 ```cmd
-npx wrangler deploy worker.js --name temp-mail-worker --compatibility-date 2026-06-16 --compatibility-flag nodejs_compat
+npx wrangler deploy worker.js --name temp-mail-worker --compatibility-date <CURRENT_DATE> --compatibility-flag nodejs_compat
 ```
 
 成功时应看到类似输出：
@@ -377,10 +374,9 @@ Deployed temp-mail-worker triggers
 https://temp-mail-worker.<account>.workers.dev
 ```
 
-- `2026-06-16` 是本次成功部署使用的 Compatibility date。
-- 以后部署新版本时，可按当时 Cloudflare 要求更新 date。
+- `<CURRENT_DATE>` 替换为部署当天或上游 Release 推荐的 Compatibility date，格式为 `YYYY-MM-DD`。
 - `--compatibility-flag nodejs_compat` 不能遗漏。
-- 记录部署输出中的 Worker URL；当前实例是 `https://temp-mail-worker.hey-04138714.workers.dev`。
+- 记录部署输出中的 Worker URL，但不要把实例专属子域提交到公开仓库。
 
 ### 9. 配置 Worker Variables 和 Secret
 
@@ -396,11 +392,8 @@ temp-mail-worker
 
 ```json
 [
-  "mail.085580.xyz",
-  "yheblog.dpdns.org",
-  "maaqidahusymuni.eu.org",
-  "yhewall.dpdns.org",
-  "yhedesk.dpdns.org"
+  "mail.example.com",
+  "mail-alt.example.net"
 ]
 ```
 
@@ -416,10 +409,10 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 | 变量 | 类型 | 当前值 | 作用 |
 | --- | --- | --- | --- |
-| `ENABLE_USER_CREATE_EMAIL` | JSON | `true` | 当前实例允许创建地址 |
-| `ENABLE_WEBHOOK` | JSON | `true` | 启用当前架构必需的邮件 Webhook |
+| `ENABLE_USER_CREATE_EMAIL` | JSON | `true` | 允许创建地址 |
+| `ENABLE_WEBHOOK` | JSON | `true` | 启用本架构必需的邮件 Webhook |
 
-当前是 Backend-only 部署，没有配置 `FRONTEND_URL`。
+Backend-only 部署不需要配置 `FRONTEND_URL`。
 
 ### 10. 绑定 D1
 
@@ -448,7 +441,7 @@ Database: temp-mail
 浏览器访问：
 
 ```text
-https://temp-mail-worker.hey-04138714.workers.dev/open_api/settings
+https://temp-mail-worker.<YOUR_ACCOUNT_SUBDOMAIN>.workers.dev/open_api/settings
 ```
 
 应该返回 JSON，重点确认：
@@ -458,11 +451,8 @@ https://temp-mail-worker.hey-04138714.workers.dev/open_api/settings
   "enableUserCreateEmail": true,
   "enableWebhook": true,
   "domains": [
-    "mail.085580.xyz",
-    "yheblog.dpdns.org",
-    "maaqidahusymuni.eu.org",
-    "yhewall.dpdns.org",
-    "yhedesk.dpdns.org"
+    "mail.example.com",
+    "mail-alt.example.net"
   ]
 }
 ```
@@ -471,14 +461,11 @@ https://temp-mail-worker.hey-04138714.workers.dev/open_api/settings
 
 ### 12. 配置 Cloudflare Email Routing
 
-Worker 能访问不等于邮箱能收信。以下 5 个收件域都必须启用 Email Routing，并拥有正确的邮件 DNS records：
+Worker 能访问不等于邮箱能收信。每个选择 Cloudflare 后端的收件域都必须启用 Email Routing，并拥有正确的邮件 DNS records，例如：
 
 ```text
-mail.085580.xyz
-yheblog.dpdns.org
-maaqidahusymuni.eu.org
-yhewall.dpdns.org
-yhedesk.dpdns.org
+mail.example.com
+mail-alt.example.net
 ```
 
 针对每个选择 `CF TempMail` 的域名进入 `Cloudflare → Email Routing`，确认：
@@ -496,18 +483,17 @@ Routing rules
 完成后的效果是任意 local-part 都交给同一个 Worker，例如：
 
 ```text
-abc@yheblog.dpdns.org
-test123@yheblog.dpdns.org
-random123@mail.085580.xyz
-whatever@yhedesk.dpdns.org
+abc@mail.example.com
+test123@mail.example.com
+random123@mail-alt.example.net
 ```
 
 这些地址都不需要预先创建。
 
-### 13. `mail.085580.xyz` 子域特别配置
+### 13. 子域收件特别配置
 
 > [!IMPORTANT]
-> 主 Zone 是 `085580.xyz`，真正的收件域是 `mail.085580.xyz`。Cloudflare Email Routing 子域不会自动继承父域配置。
+> 如果主 Zone 是 `example.com`，真正的收件域是 `mail.example.com`，必须单独检查子域的 Email Routing。子域不会自动继承父域配置。
 
 进入：
 
@@ -517,7 +503,7 @@ Email Routing
 → Subdomains
 ```
 
-添加 `mail.085580.xyz` 并确认状态为 `Enabled`，然后针对该子域配置：
+添加 `mail.example.com` 并确认状态为 `Enabled`，然后针对该子域配置：
 
 ```text
 Catch-all
@@ -565,13 +551,13 @@ Namespace: temp-mail-kv
 
 ### 15. VPS Webhook 接收服务
 
-当前公网接口：
+公网接口格式：
 
 ```text
-https://cliapi.085580.xyz/webhooks/temp-mail
+https://bot.example.com/webhooks/temp-mail
 ```
 
-当前技术栈和数据流：
+技术栈和数据流：
 
 ```text
 Apache HTTPS Reverse Proxy
@@ -580,15 +566,15 @@ Apache HTTPS Reverse Proxy
 → PostgreSQL.temp_mail_messages
 ```
 
-当前 VPS 的 secret 文件是 `/root/tgmag/vps_gpt/.env`；不同安装目录应使用对应项目根目录的 `.env`。只能写入占位值：
+Secret 保存在项目根目录的 `.env`；标准生产部署路径是 `/opt/tg-account-bot/.env`。文档和仓库中只能写占位值：
 
 ```env
 MINI_APP_ENABLED=true
 MINI_APP_HOST=127.0.0.1
 MINI_APP_PORT=8080
 LOGIN_EMAIL_PROTECTION_ENABLED=true
-LOGIN_EMAIL_ALIAS_DOMAINS=mail.085580.xyz,yheblog.dpdns.org,maaqidahusymuni.eu.org,yhewall.dpdns.org,yhedesk.dpdns.org
-LOGIN_EMAIL_DOMAIN_BACKENDS=mail.085580.xyz=cloudflare,yheblog.dpdns.org=cloudflare,maaqidahusymuni.eu.org=cloudflare,yhewall.dpdns.org=cloudflare,yhedesk.dpdns.org=cloudflare
+LOGIN_EMAIL_ALIAS_DOMAINS=mail.example.com,mail-alt.example.net
+LOGIN_EMAIL_DOMAIN_BACKENDS=mail.example.com=cloudflare,mail-alt.example.net=cloudflare
 TEMP_MAIL_WEBHOOK_SECRET=<YOUR_RANDOM_SECRET>
 ```
 
@@ -607,12 +593,12 @@ sudo systemctl restart tg-account-bot
 
 迁移 `0009_temp_mail_messages` 会创建 VPS 的 `temp_mail_messages` 表。当前 aiohttp 服务与 Mini App 共用启动开关，因此 `MINI_APP_ENABLED=true` 是 Webhook 监听 `127.0.0.1:8080` 的必要条件。运行后也可以在 Telegram 中逐个切换后端；数据库中的选择优先于上述初始映射。
 
-在现有 `cliapi.085580.xyz` HTTPS VirtualHost 中复用 Apache 证书并添加：
+在自己的 HTTPS VirtualHost 中复用 Apache 证书并添加：
 
 ```apache
 ProxyPreserveHost On
 RequestHeader set X-Forwarded-Proto "https"
-RequestHeader set X-Forwarded-Host "cliapi.085580.xyz"
+RequestHeader set X-Forwarded-Host "bot.example.com"
 
 ProxyPass /webhooks/temp-mail http://127.0.0.1:8080/webhooks/temp-mail
 ProxyPassReverse /webhooks/temp-mail http://127.0.0.1:8080/webhooks/temp-mail
@@ -656,11 +642,11 @@ X-Temp-Mail-Secret: <YOUR_RANDOM_SECRET>
 }
 ```
 
-VPS 从 `to` 提取完整地址和域名。例如 `abc@yheblog.dpdns.org` 会解析为：
+VPS 从 `to` 提取完整地址和域名。例如 `abc@mail.example.com` 会解析为：
 
 ```text
-address = abc@yheblog.dpdns.org
-domain = yheblog.dpdns.org
+address = abc@mail.example.com
+domain = mail.example.com
 ```
 
 `temp_mail_messages` 保存 `id`、`from`、`to`、`domain`、`subject`、`raw`、`parsedText`、`parsedHtml`、AI 提取字段、`url` 和 `received_at`。`(id, to)` 是复合主键，同一 Webhook 重试不会产生重复记录；`to + received_at` 和 `domain + received_at` 均有索引，可按完整地址查询全部邮件或最新一封。
@@ -689,7 +675,7 @@ Value 使用以下 JSON 模板。只在 Cloudflare KV 中把 `<TEMP_MAIL_WEBHOOK
 ```json
 {
   "enabled": true,
-  "url": "https://cliapi.085580.xyz/webhooks/temp-mail",
+  "url": "https://bot.example.com/webhooks/temp-mail",
   "method": "POST",
   "headers": "{\"Content-Type\":\"application/json\",\"X-Temp-Mail-Secret\":\"<TEMP_MAIL_WEBHOOK_SECRET>\"}",
   "body": "{\"id\":\"${id}\",\"url\":\"${url}\",\"from\":\"${from}\",\"to\":\"${to}\",\"subject\":\"${subject}\",\"raw\":\"${raw}\",\"parsedText\":\"${parsedText}\",\"parsedHtml\":\"${parsedHtml}\",\"aiExtractType\":\"${aiExtractType}\",\"aiExtractResult\":\"${aiExtractResult}\",\"aiExtractResultText\":\"${aiExtractResultText}\"}"
@@ -700,7 +686,7 @@ Value 使用以下 JSON 模板。只在 Cloudflare KV 中把 `<TEMP_MAIL_WEBHOOK
 
 ### 18. 为什么不部署前端 Pages
 
-当前部署有意不使用 Cloudflare Pages：
+本架构有意不使用 Cloudflare Pages：
 
 ```text
 不需要 frontend.zip
@@ -729,13 +715,13 @@ Cloudflare 收信
 ```bash
 curl -i \
   -X POST \
-  https://cliapi.085580.xyz/webhooks/temp-mail \
+  https://bot.example.com/webhooks/temp-mail \
   -H 'Content-Type: application/json' \
   -H 'X-Temp-Mail-Secret: <TEMP_MAIL_WEBHOOK_SECRET>' \
   -d '{
     "id":"test-001",
     "from":"sender@example.com",
-    "to":"abc@mail.085580.xyz",
+    "to":"abc@mail.example.com",
     "subject":"Webhook Test",
     "raw":"",
     "parsedText":"Hello TempMail",
@@ -750,7 +736,7 @@ curl -i \
 从 Gmail、Outlook 或其他外部邮箱发送：
 
 ```text
-To: cfhooktest@yheblog.dpdns.org
+To: cfhooktest@mail.example.com
 Subject: CF-WEBHOOK-TEST-001
 ```
 
@@ -765,7 +751,7 @@ SELECT
     subject,
     received_at
 FROM temp_mail_messages
-WHERE "to" = 'cfhooktest@yheblog.dpdns.org'
+WHERE "to" = 'cfhooktest@mail.example.com'
 ORDER BY received_at DESC
 LIMIT 10;
 ```
@@ -812,7 +798,7 @@ VPS 使用 `to` 和 `domain` 区分邮件。允许域名来自 `LOGIN_EMAIL_ALIA
 | Worker 可访问但邮箱收不到信 | Email Routing 链路 | 检查 Enabled、邮件 DNS records、Catch-all Active，以及是否 Send to `temp-mail-worker` |
 | Telegram 选择与实际 Catch-all 不一致 | 域名后端映射 | CF 邮件落在 Gmail 或 Gmail 邮件发给 Worker 时，程序会去错误来源等待；先同步邮件路由，再在 Bot 中选择同一后端 |
 | Gmail 域名取码失败 | Gmail 转发和 IMAP | 确认目标地址已验证、Gmail 已收到邮件、应用专用密码有效，并点击“检查邮件接收” |
-| 主域能收但 `mail.085580.xyz` 不能收 | 子域 Email Routing | 在 `Email Routing → Settings → Subdomains` 单独启用 `mail.085580.xyz` 并配置 Catch-all |
+| 主域能收但收件子域不能收 | 子域 Email Routing | 在 `Email Routing → Settings → Subdomains` 单独启用实际收件子域并配置 Catch-all |
 | Webhook `url` 为空 | 未部署 Pages、未设置 `FRONTEND_URL` | 当前 Backend-only 架构下属于正常现象，不能据此判断失败 |
 | VPS 收到并保存邮件，但 Telegram 换绑失败 | Telegram 域名策略或限流 | 查看 Bot 通知和 `journalctl`；`EMAIL_NOT_ALLOWED`、`FLOOD_WAIT` 不代表 Webhook 故障 |
 | VPS 完全没有请求日志 | Worker 尚未 POST | 区分“Email Routing 收信成功”和“Webhook 投递成功”，检查 Worker/KV 配置和 Worker 日志 |
@@ -831,7 +817,7 @@ sudo apache2ctl configtest
 > [!CAUTION]
 > 禁止把 `JWT_SECRET`、`TEMP_MAIL_WEBHOOK_SECRET`、Cloudflare API Token、数据库密码、Bot Token、Fernet 密钥或 Telegram Session 提交到仓库。
 
-- `.env` 必须保持在 `.gitignore`；当前 secret 位于 `/root/tgmag/vps_gpt/.env`，但 README 只能出现变量名或占位符。
+- `.env` 必须保持在 `.gitignore`；README 只能出现变量名或占位符。
 - 不要执行 `cat .env` 后把整份内容复制到 README、Issue、聊天记录、Git commit 或公开日志。
 - VPS 使用 `X-Temp-Mail-Secret` 校验 Worker，请求头和 secret 不得写入应用日志或 Apache 自定义日志格式。
 - 排查 Cloudflare Worker 时不要粘贴 KV Value 或完整 headers；如果 secret 疑似暴露，应同时更新 VPS `.env` 和 KV Webhook headers，然后重启服务并重新测试。
@@ -875,7 +861,7 @@ npx wrangler deploy worker.js --name temp-mail-worker --compatibility-date <CURR
 - [ ] D1 Binding 名称为大写 `DB`
 - [ ] `/open_api/settings` 返回正常 JSON
 - [ ] 每个域名的 Email Routing/Catch-all 与 Telegram 中的后端选择一致
-- [ ] `mail.085580.xyz` 子域 Email Routing 已单独启用
+- [ ] 使用收件子域时，子域 Email Routing 已单独启用
 - [ ] CF TempMail 域名 Catch-all 指向 `temp-mail-worker`
 - [ ] Gmail 域名 Catch-all 指向已验证的 Gmail 地址
 - [ ] KV `temp-mail-kv` 已创建
