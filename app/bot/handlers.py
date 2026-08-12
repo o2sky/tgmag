@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import shlex
-import asyncio
 import tempfile
 import urllib.request
 from datetime import datetime, timezone
@@ -21,16 +21,17 @@ from aiogram.types import (
 )
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+from telethon import functions
 from telethon.errors import (
     FloodWaitError,
+    PasswordHashInvalidError,
     PhoneCodeEmptyError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
     PhoneNumberInvalidError,
+    SessionPasswordNeededError,
 )
-from telethon import functions
 
 from app.bot.auth import AdminOnlyMiddleware
 from app.bot.formatting import COMMANDS, account_line
@@ -63,9 +64,9 @@ from app.bot.states import (
     ExportSessionFlow,
     ImportSessionFlow,
     ImportSessionsFlow,
-    LoginFlow,
     LoginEmailDomainFlow,
     LoginEmailWindowFlow,
+    LoginFlow,
     ProfileEditFlow,
     TwoFAEditFlow,
 )
@@ -74,28 +75,33 @@ from app.db.models import (
     AccountSecurity,
     Admin,
     AllowedTarget,
+    Job,
+    LoginEmailProtectionEvent,
+    LoginEmailWhitelist,
     PrivacySettings,
     RateLimit,
     SpamCheck,
     TgAccount,
     TgSession,
-    Job,
-    LoginEmailProtectionEvent,
-    LoginEmailWhitelist,
 )
-from app.services.crypto import decrypt_text
 from app.services.audit import audit
 from app.services.backups import create_database_backup_async
+from app.services.crypto import decrypt_text
 from app.services.jobs import add_job_item, create_job, finish_job
 from app.services.login_email_protection import (
+    EMAIL_BACKEND_CLOUDFLARE,
+    EMAIL_BACKEND_GMAIL,
     add_available_domain,
     delete_available_domain,
+    email_backend_label,
     format_wait_deadline,
     get_available_domains,
+    get_domain_backends,
     get_selected_domain,
     get_whitelist_ids,
     login_email_wait_remaining,
     parse_login_email_window_hours,
+    set_domain_backend,
     set_selected_domain,
     set_whitelisted,
 )
@@ -430,12 +436,13 @@ async def status_text(
             (await session.scalars(select(TgSession.account_id).where(TgSession.is_active.is_(True)))).all()
         )
         selected_domain = await get_selected_domain(session)
+        domain_backends = await get_domain_backends(session)
         whitelist_ids = await get_whitelist_ids(session)
     connected_active_ids = active_account_ids.intersection(client_pool.connected_account_ids)
     protected_connected_ids = connected_active_ids.difference(whitelist_ids)
-    configuration_ready = bool(
-        settings.temp_mail_webhook_secret
-        and selected_domain
+    required_backends = set(domain_backends.values())
+    configuration_ready = bool(selected_domain) and required_backends.issubset(
+        settings.configured_login_email_backends
     )
     email_guard_status = login_email_runtime_status(
         configuration_ready=configuration_ready,
@@ -447,7 +454,7 @@ async def status_text(
         health_checked=client_pool.login_email_health_checked_at is not None,
         health_error=client_pool.login_email_health_error,
     )
-    temp_mail_status = (
+    mail_reader_status = (
         "未检查"
         if client_pool.login_email_health_checked_at is None
         else "失败"
@@ -463,7 +470,7 @@ async def status_text(
         f"已连接: {len(client_pool.connected_account_ids)}\n"
         f"登录邮箱保护开关: {'开启' if settings.login_email_protection_enabled else '关闭'}\n"
         f"登录邮箱保护状态: {email_guard_status}\n"
-        f"Temp Mail 存储: {temp_mail_status}\n"
+        f"邮件接收链路: {mail_reader_status}\n"
         f"自动保护账号: {len(protected_connected_ids)}/{len(active_account_ids)}\n"
         f"保护域名: @{selected_domain or '-'}\n"
         f"保护白名单: {len(whitelist_ids)}\n"
@@ -497,9 +504,9 @@ def login_email_runtime_status(
     if protected_connected_count == 0:
         return "已连接账号均在白名单"
     if not health_checked:
-        return "Temp Mail 存储尚未检查"
+        return "邮件接收链路尚未检查"
     if health_error:
-        return "Temp Mail 存储不可用"
+        return "邮件接收链路不可用"
     if connected_count < active_count:
         return f"基础链路部分就绪（已连接 {connected_count}/{active_count}）"
     return "基础链路就绪（待全链路检测）"
@@ -2063,6 +2070,7 @@ async def login_email_guard_view(
     client_pool: ClientPool,
 ) -> tuple[str, InlineKeyboardMarkup]:
     domains = await get_available_domains(session)
+    domain_backends = await get_domain_backends(session)
     selected_domain = await get_selected_domain(session)
     whitelisted_ids = await get_whitelist_ids(session)
     active_account_ids = set(
@@ -2073,12 +2081,11 @@ async def login_email_guard_view(
     event_count = await session.scalar(
         select(func.count()).select_from(LoginEmailProtectionEvent)
     )
-    configuration_ready = bool(
-        domains
-        and selected_domain
-        and settings.temp_mail_webhook_secret
+    required_backends = set(domain_backends.values())
+    configuration_ready = bool(domains and selected_domain) and required_backends.issubset(
+        settings.configured_login_email_backends
     )
-    credentials_ready = bool(settings.temp_mail_webhook_secret)
+    credentials_ready = bool(settings.configured_login_email_backends)
     protection_status = login_email_runtime_status(
         configuration_ready=configuration_ready,
         monitor_enabled=client_pool.monitor_enabled,
@@ -2089,7 +2096,7 @@ async def login_email_guard_view(
         health_checked=client_pool.login_email_health_checked_at is not None,
         health_error=client_pool.login_email_health_error,
     )
-    temp_mail_status = (
+    mail_reader_status = (
         "未检查"
         if client_pool.login_email_health_checked_at is None
         else "失败"
@@ -2100,12 +2107,12 @@ async def login_email_guard_view(
         "安全防护中心",
         f"自动换绑开关：{'开启' if settings.login_email_protection_enabled else '关闭'}",
         f"运行状态：{protection_status}",
-        f"Webhook Secret：{'已填写' if credentials_ready else '未填写'}",
-        f"Temp Mail 存储：{temp_mail_status}",
+        f"可用接收后端：{', '.join(email_backend_label(item) for item in sorted(settings.configured_login_email_backends)) or '未配置'}",
+        f"邮件接收链路：{mail_reader_status}",
         f"当前域名：@{selected_domain}" if selected_domain else "当前域名：未配置",
         f"实时监听：{'运行中' if client_pool.service_monitor_running else '未运行'}",
         f"自动保护账号：{len(protected_connected_ids)}/{len(active_account_ids)}",
-        f"候选域名：{len(domains)} 个",
+        f"候选域名：{len(domains)} 个（可分别选择 CF TempMail / Gmail）",
         f"白名单账号：{len(whitelisted_ids)} 个",
         f"保护事件：{event_count or 0} 条",
         "",
@@ -2114,7 +2121,7 @@ async def login_email_guard_view(
     if not settings.login_email_protection_enabled:
         lines.extend(["", "提示：环境变量中的自动保护开关当前为关闭状态。"])
     elif not credentials_ready:
-        lines.extend(["", "提示：缺少 TEMP_MAIL_WEBHOOK_SECRET。"])
+        lines.extend(["", "提示：至少配置 Cloudflare Webhook secret 或 Gmail IMAP 凭据。"])
     elif not domains or not selected_domain:
         lines.extend(["", "提示：至少需要配置并选中一个登录邮箱域名。"])
     elif not client_pool.monitor_enabled:
@@ -2128,18 +2135,26 @@ async def login_email_guard_view(
     elif not protected_connected_ids:
         lines.extend(["", "提示：所有已连接账号都在白名单中，只会转发提醒，不会自动换绑。"])
     elif client_pool.login_email_health_error:
-        lines.extend(["", "提示：Temp Mail 存储检查失败，请点击“检查 Temp Mail”查看具体原因。"])
+        lines.extend(["", "提示：邮件接收链路检查失败，请点击“检查邮件接收”查看具体原因。"])
     return "\n".join(lines), login_email_guard_panel()
 
 
 async def login_email_domains_view(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
     domains = await get_available_domains(session)
+    domain_backends = await get_domain_backends(session)
     selected = await get_selected_domain(session)
-    lines = ["邮箱域名管理", "点击域名可设为默认；删除操作需要二次确认。", ""]
+    lines = [
+        "邮箱域名管理",
+        "点击域名可设为默认；点击右侧接收方式可在 CF TempMail 与 Gmail 间切换。",
+        "Cloudflare Email Routing 的实际 Catch-all 目标必须与这里一致。",
+        "",
+    ]
     lines.extend(
-        f"{'当前 · ' if domain == selected else ''}@{domain}" for domain in domains
+        f"{'当前 · ' if domain == selected else ''}@{domain} → "
+        f"{email_backend_label(domain_backends[domain])}"
+        for domain in domains
     )
-    return "\n".join(lines), login_email_domains_panel(domains, selected)
+    return "\n".join(lines), login_email_domains_panel(domains, selected, domain_backends)
 
 
 async def login_email_whitelist_view(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
@@ -2202,17 +2217,17 @@ async def login_email_guard_callback(
             await callback.message.answer(report.render()[:4096], reply_markup=login_email_guard_panel())
         return
     if action == "testimap":
-        if not settings.temp_mail_webhook_secret:
-            await callback.answer("Webhook secret 未填写", show_alert=True)
+        if not settings.configured_login_email_backends:
+            await callback.answer("尚未配置任何邮件接收后端", show_alert=True)
             return
-        await callback.answer("正在检查 Temp Mail 存储...")
+        await callback.answer("正在检查邮件接收链路...")
         try:
             await client_pool.check_login_email_health()
             if client_pool.login_email_health_error:
                 raise RuntimeError(client_pool.login_email_health_error)
-            result_text = "Temp Mail 检查成功，Webhook secret 和邮件数据表可用。"
+            result_text = "邮件接收检查成功：当前域名使用到的后端均可用。"
         except Exception as exc:
-            result_text = f"Temp Mail 检查失败：{str(exc)[:800]}"
+            result_text = f"邮件接收检查失败：{str(exc)[:800]}"
         if callback.message:
             await callback.message.answer(result_text, reply_markup=login_email_guard_panel())
         return
@@ -2253,6 +2268,26 @@ async def login_email_guard_callback(
                 await callback.answer("域名配置已变化，请重新打开", show_alert=True)
                 return
             await set_selected_domain(session, domain)
+            text, panel = await login_email_domains_view(session)
+        elif action == "backend" and len(parts) == 3:
+            domains = await get_available_domains(session)
+            domain_backends = await get_domain_backends(session)
+            try:
+                domain = domains[int(parts[2])]
+            except (IndexError, ValueError):
+                await callback.answer("域名配置已变化，请重新打开", show_alert=True)
+                return
+            current_backend = domain_backends[domain]
+            target_backend = (
+                EMAIL_BACKEND_GMAIL
+                if current_backend == EMAIL_BACKEND_CLOUDFLARE
+                else EMAIL_BACKEND_CLOUDFLARE
+            )
+            try:
+                await set_domain_backend(session, domain, target_backend)
+            except ValueError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
             text, panel = await login_email_domains_view(session)
         elif action == "add":
             await state.set_state(LoginEmailDomainFlow.value)

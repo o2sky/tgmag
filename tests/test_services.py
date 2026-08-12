@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.bot import handlers
 from app.bot.handlers import (
     forward_to_target,
     login_email_guard_callback,
     login_email_runtime_status,
     parse_account_selection,
 )
+from app.bot.keyboards import login_email_guard_panel
 from app.config import settings
 from app.services import security_health
 from app.services.rate_limit import validate_rate_values
@@ -81,6 +83,53 @@ def test_domain_add_prompt_has_clickable_cancel_button() -> None:
     assert button.callback_data == "flow:cancel"
 
 
+def test_telegram_domain_button_switches_the_reader_backend(monkeypatch) -> None:
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        handlers,
+        "get_available_domains",
+        AsyncMock(return_value=("mail.example.com",)),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "get_domain_backends",
+        AsyncMock(return_value={"mail.example.com": "cloudflare"}),
+    )
+    switch = AsyncMock()
+    monkeypatch.setattr(handlers, "set_domain_backend", switch)
+    monkeypatch.setattr(
+        handlers,
+        "login_email_domains_view",
+        AsyncMock(return_value=("updated", login_email_guard_panel())),
+    )
+    session = Session()
+    message = SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
+    callback = SimpleNamespace(
+        data="emailguard:backend:0",
+        answer=AsyncMock(),
+        message=message,
+    )
+
+    asyncio.run(
+        login_email_guard_callback(
+            callback,
+            lambda: session,
+            object(),
+            SimpleNamespace(),
+        )
+    )
+
+    switch.assert_awaited_once_with(session, "mail.example.com", "gmail")
+    callback.answer.assert_awaited_once()
+    message.edit_text.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
@@ -92,8 +141,8 @@ def test_domain_add_prompt_has_clickable_cancel_button() -> None:
         ),
         ({"connected_count": 0, "protected_connected_count": 0}, "账号均未连接"),
         ({"protected_connected_count": 0}, "已连接账号均在白名单"),
-        ({"health_checked": False}, "Temp Mail 存储尚未检查"),
-        ({"health_error": "database unavailable"}, "Temp Mail 存储不可用"),
+        ({"health_checked": False}, "邮件接收链路尚未检查"),
+        ({"health_error": "database unavailable"}, "邮件接收链路不可用"),
         ({"connected_count": 1}, "基础链路部分就绪（已连接 1/2）"),
         ({}, "基础链路就绪（待全链路检测）"),
     ],
@@ -189,6 +238,11 @@ def test_full_security_check_uses_current_runtime_state_without_historical_event
         security_health,
         "get_selected_domain",
         AsyncMock(return_value="mail.example.com"),
+    )
+    monkeypatch.setattr(
+        security_health,
+        "get_domain_backends",
+        AsyncMock(return_value={"mail.example.com": "cloudflare"}),
     )
     monkeypatch.setattr(security_health, "get_whitelist_ids", AsyncMock(return_value=set()))
 

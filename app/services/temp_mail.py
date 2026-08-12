@@ -9,30 +9,30 @@ from sqlalchemy import desc, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.models import TempMailMessage
 
-ALLOWED_TEMP_MAIL_DOMAINS = frozenset(
-    {
-        "mail.085580.xyz",
-        "yheblog.dpdns.org",
-        "maaqidahusymuni.eu.org",
-        "yhewall.dpdns.org",
-        "yhedesk.dpdns.org",
-    }
-)
+ALLOWED_TEMP_MAIL_DOMAINS = frozenset(settings.login_email_alias_domains)
 
 
-def normalize_recipient(address: str) -> tuple[str, str]:
+def normalize_recipient(
+    address: str,
+    allowed_domains: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+) -> tuple[str, str]:
     normalized = address.strip().lower()
     if len(normalized) > 320 or normalized.count("@") != 1:
         raise ValueError("invalid recipient address")
     local_part, domain = normalized.rsplit("@", 1)
-    if not local_part or len(local_part) > 64 or domain not in ALLOWED_TEMP_MAIL_DOMAINS:
+    allowed = ALLOWED_TEMP_MAIL_DOMAINS if allowed_domains is None else frozenset(allowed_domains)
+    if not local_part or len(local_part) > 64 or domain not in allowed:
         raise ValueError("recipient domain is not allowed")
     return normalized, domain
 
 
-def parse_allowed_recipients(value: object) -> tuple[tuple[str, str], ...]:
+def parse_allowed_recipients(
+    value: object,
+    allowed_domains: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+) -> tuple[tuple[str, str], ...]:
     if isinstance(value, str):
         headers = [value]
     elif isinstance(value, list) and all(isinstance(item, str) for item in value):
@@ -43,7 +43,7 @@ def parse_allowed_recipients(value: object) -> tuple[tuple[str, str], ...]:
     seen: set[str] = set()
     for _, address in getaddresses(headers):
         try:
-            recipient, domain = normalize_recipient(address)
+            recipient, domain = normalize_recipient(address, allowed_domains)
         except ValueError:
             continue
         if recipient not in seen:
@@ -60,11 +60,16 @@ def _optional_text(value: object) -> str | None:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-async def store_temp_mail_payload(session: AsyncSession, payload: Mapping[str, Any]) -> int:
+async def store_temp_mail_payload(
+    session: AsyncSession,
+    payload: Mapping[str, Any],
+    *,
+    allowed_domains: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+) -> int:
     message_id = str(payload.get("id") or "").strip()
     if not message_id or len(message_id) > 255:
         raise ValueError("id must be a non-empty string no longer than 255 characters")
-    recipients = parse_allowed_recipients(payload.get("to"))
+    recipients = parse_allowed_recipients(payload.get("to"), allowed_domains)
     if not recipients:
         return 0
     sender = _optional_text(payload.get("from")) or ""

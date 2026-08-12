@@ -43,9 +43,9 @@ async def main() -> None:
     if recovered_events:
         logger.warning("Marked %s incomplete login email protection events as interrupted", recovered_events)
     logger.info(
-        "Login email protection: enabled=%s, webhook_configured=%s, domains=%s",
+        "Login email protection: enabled=%s, backends=%s, domains=%s",
         settings.login_email_protection_enabled,
-        bool(settings.temp_mail_webhook_secret),
+        ",".join(sorted(settings.configured_login_email_backends)) or "none",
         len(settings.login_email_alias_domains),
     )
 

@@ -14,6 +14,7 @@
 - [运行要求](#运行要求)
 - [快速开始](#快速开始)
 - [环境变量](#环境变量)
+- [按域名选择邮件接收后端](#按域名选择邮件接收后端)
 - [TempMail / Cloudflare Temp Email 部署](#tempmail--cloudflare-temp-email-部署backend-only)
 - [生产环境稳定运行](#生产环境稳定运行)
 - [VPS 重启后自动启动](#vps-重启后自动启动)
@@ -29,7 +30,7 @@
 - Telegram Bot Token
 - Telegram API ID 与 API Hash
 - 公网 HTTPS 域名（Mini App 或 TempMail Webhook 需要）
-- Cloudflare Temp Email、Webhook secret 和 catch-all 域名（仅登录邮箱保护需要）
+- catch-all 收件域名，以及 Cloudflare Temp Email 或 Gmail IMAP（仅登录邮箱保护需要）
 
 ## 快速开始
 
@@ -103,13 +104,17 @@ python -m app.main
 
 ### 登录邮箱保护
 
-登录邮箱保护默认开启。启用时需要配置以下变量：
+登录邮箱保护默认开启。每个域名可以独立选择 `cloudflare` 或 `gmail` 接收后端；同一进程可以同时使用两种方式。
 
 | 环境变量 | 必需条件 | 说明 |
 | --- | :---: | --- |
 | `LOGIN_EMAIL_PROTECTION_ENABLED` | 否 | 是否启用自动登录邮箱保护，默认 `true`；不使用时设为 `false`。 |
 | `LOGIN_EMAIL_ALIAS_DOMAINS` | 启用邮箱保护时 | catch-all 域名列表；多个域名使用英文逗号分隔，第一个为初始默认域名。 |
-| `TEMP_MAIL_WEBHOOK_SECRET` | 启用邮箱保护时 | Cloudflare Temp Email 调用 Webhook 时使用的随机共享密钥。 |
+| `LOGIN_EMAIL_DOMAIN_BACKENDS` | 推荐 | 初始路由，格式为 `域名=cloudflare` 或 `域名=gmail`，用逗号分隔；之后可在 Telegram Bot 中逐域名切换。 |
+| `TEMP_MAIL_WEBHOOK_SECRET` | 存在 Cloudflare 域名时 | Cloudflare Temp Email 调用 Webhook 时使用的随机共享密钥。 |
+| `LOGIN_EMAIL_GMAIL_USERNAME` | 存在 Gmail 域名时 | 接收 catch-all 转发邮件的 Gmail 地址。 |
+| `LOGIN_EMAIL_GMAIL_APP_PASSWORD` | 存在 Gmail 域名时 | Gmail 应用专用密码，不是 Google 账号普通密码。 |
+| `LOGIN_EMAIL_IMAP_HOST` / `PORT` / `FOLDER` | 否 | 默认 `imap.gmail.com` / `993` / `INBOX`。 |
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | 等待 catch-all 转发验证码的时间，默认 `300` 秒（5 分钟）；等待期间不会重复请求验证码。 |
 
 示例：
@@ -117,9 +122,14 @@ python -m app.main
 ```env
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
+LOGIN_EMAIL_DOMAIN_BACKENDS=mail-a.example.com=cloudflare,mail-b.example.net=gmail
 TEMP_MAIL_WEBHOOK_SECRET=<YOUR_RANDOM_SECRET>
+LOGIN_EMAIL_GMAIL_USERNAME=<YOUR_GMAIL_ADDRESS>
+LOGIN_EMAIL_GMAIL_APP_PASSWORD=<YOUR_GMAIL_APP_PASSWORD>
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=300
 ```
+
+只使用其中一种后端时，可以省略另一种后端的凭据。未配置 `LOGIN_EMAIL_DOMAIN_BACKENDS` 时，程序为兼容旧部署按以下顺序选择默认值：配置了 Webhook secret 就使用 `cloudflare`，否则使用 `gmail`。合并升级后建议显式填写映射，并在 Telegram Bot 中核对每个域名。
 
 每个 TG 账号都可以在 Mini App 的“登录邮箱保护”中单独填写等待时长，单位为整数小时，允许 `0–720`。默认值为 `0`，即收到有效的 777000 登录提醒后立即换绑；大于 `0` 时，在固定窗口内只转发并累计提醒，到期换绑一次。修改只影响之后的新窗口，不改变已经开始的窗口。
 
@@ -139,7 +149,61 @@ LOGIN_EMAIL_PROTECTION_ENABLED=false
 | `MINI_APP_PORT` | 否 | Mini App 监听端口，默认 `8080`。 |
 
 > [!CAUTION]
-> `.env`、Bot Token、API Hash、数据库密码、Fernet 密钥、Telegram Session 和 Webhook secret 都属于敏感信息，不要提交到 GitHub。
+> `.env`、Bot Token、API Hash、数据库密码、Fernet 密钥、Telegram Session、Webhook secret 和 Gmail 应用专用密码都属于敏感信息，不要提交到 GitHub。
+
+## 按域名选择邮件接收后端
+
+合并后的程序保留两套邮件读取链路，并按**完整收件地址的域名**自动选取：
+
+```mermaid
+flowchart TD
+    telegram[Telegram 登录邮箱验证码] --> routing[域名 Catch-all]
+    routing -->|该域名选择 CF TempMail| worker[Cloudflare Temp Email Worker]
+    worker -->|Webhook| postgres[(PostgreSQL temp_mail_messages)]
+    routing -->|该域名选择 Gmail| gmail[Gmail 收件箱]
+    postgres --> selector[程序按域名读取]
+    gmail -->|IMAP| selector
+    selector --> confirm[校验发件人、收件地址、用途和验证码]
+```
+
+两处配置必须一致：
+
+1. 在 Cloudflare Email Routing 或域名邮件平台中，手动把该域名的 Catch-all 指向 Cloudflare Worker 或 Gmail；
+2. 在 Telegram Bot 中进入 `安全防护 → 邮箱域名管理`，点击域名右侧的 `CF TempMail` / `Gmail` 按钮，选择同一个后端。
+
+程序不会修改 Cloudflare Email Routing，也不会把邮件从一种后端搬到另一种后端。Telegram 中的选择只决定程序去哪里读取验证码：
+
+| Telegram 选择 | 域名邮件侧应配置 | 程序读取位置 |
+| --- | --- | --- |
+| `CF TempMail` | Catch-all → `temp-mail-worker` | PostgreSQL `temp_mail_messages` |
+| `Gmail` | Catch-all → 经过验证的 Gmail 目标地址 | Gmail IMAP `INBOX`（或 `LOGIN_EMAIL_IMAP_FOLDER`） |
+
+切换后端不会改变历史邮件，也不需要重新部署程序。应先调整域名邮件路由，再在 Telegram 中切换；避免在验证码已经发送并等待期间切换。若目标后端缺少凭据，Bot 会拒绝切换并提示需要补充的环境变量。
+
+### Gmail 后端部署
+
+1. 准备专门接收 catch-all 转发的 Gmail 账号，并在 Google 账号中启用两步验证；
+2. 按 [Google 官方说明](https://support.google.com/accounts/answer/185833)创建应用专用密码，只把它保存到 VPS `.env`；
+3. 在 Cloudflare Email Routing 中验证该 Gmail 目标地址；
+4. 对选择 Gmail 的域名设置 `Catch-all → Send to an email → <YOUR_GMAIL_ADDRESS>`；
+5. 在 `.env` 配置：
+
+```env
+LOGIN_EMAIL_GMAIL_USERNAME=<YOUR_GMAIL_ADDRESS>
+LOGIN_EMAIL_GMAIL_APP_PASSWORD=<YOUR_GMAIL_APP_PASSWORD>
+LOGIN_EMAIL_IMAP_HOST=imap.gmail.com
+LOGIN_EMAIL_IMAP_PORT=993
+LOGIN_EMAIL_IMAP_FOLDER=INBOX
+```
+
+重启服务后，在 Telegram 中把对应域名切换为 `Gmail`，再点击“检查邮件接收”。Gmail 链路通过 [Gmail IMAP](https://support.google.com/mail/answer/7126229) 轮询最新邮件；Cloudflare TempMail 链路仍由 Worker 主动 POST，不会因为启用 Gmail 而变成轮询 Worker。
+
+### 从单一后端版本升级
+
+- 原 Gmail 部署：保留现有 `LOGIN_EMAIL_GMAIL_*`，执行数据库迁移；需要 Cloudflare 后端时再增加 `TEMP_MAIL_WEBHOOK_SECRET` 和 Webhook 配置。
+- 原 Cloudflare TempMail 部署：保留现有 Webhook、PostgreSQL 表和 secret；需要 Gmail 后端时再增加 Gmail 凭据。
+- 建议在 `.env` 显式填写 `LOGIN_EMAIL_DOMAIN_BACKENDS` 作为首次默认值。Bot 第一次修改后，逐域名映射保存在 PostgreSQL `runtime_settings`，不需要新增业务表。
+- 更新后执行 `.venv/bin/alembic upgrade head`、重启服务，在 Telegram 中逐个核对域名和后端，再点击“检查邮件接收”。
 
 ## TempMail / Cloudflare Temp Email 部署（Backend-only）
 
@@ -188,7 +252,7 @@ flowchart TD
 | VPS Webhook | `https://cliapi.085580.xyz/webhooks/temp-mail` |
 | VPS 邮件表 | `temp_mail_messages` |
 
-当前接收以下 5 个域名下的任意地址：
+当前 Cloudflare Temp Email Worker 和 VPS 候选列表包含以下 5 个域名；只有在 Telegram 中选择 `CF TempMail` 且邮件侧 Catch-all 指向 Worker 的域名才走本节链路：
 
 ```text
 mail.085580.xyz
@@ -417,7 +481,7 @@ yhewall.dpdns.org
 yhedesk.dpdns.org
 ```
 
-针对每个域名进入 `Cloudflare → Email Routing`，确认：
+针对每个选择 `CF TempMail` 的域名进入 `Cloudflare → Email Routing`，确认：
 
 ```text
 Email Routing = Enabled
@@ -524,6 +588,7 @@ MINI_APP_HOST=127.0.0.1
 MINI_APP_PORT=8080
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail.085580.xyz,yheblog.dpdns.org,maaqidahusymuni.eu.org,yhewall.dpdns.org,yhedesk.dpdns.org
+LOGIN_EMAIL_DOMAIN_BACKENDS=mail.085580.xyz=cloudflare,yheblog.dpdns.org=cloudflare,maaqidahusymuni.eu.org=cloudflare,yhewall.dpdns.org=cloudflare,yhedesk.dpdns.org=cloudflare
 TEMP_MAIL_WEBHOOK_SECRET=<YOUR_RANDOM_SECRET>
 ```
 
@@ -540,7 +605,7 @@ openssl rand -hex 32
 sudo systemctl restart tg-account-bot
 ```
 
-迁移 `0009_temp_mail_messages` 会创建 VPS 的 `temp_mail_messages` 表。当前 aiohttp 服务与 Mini App 共用启动开关，因此 `MINI_APP_ENABLED=true` 是 Webhook 监听 `127.0.0.1:8080` 的必要条件。
+迁移 `0009_temp_mail_messages` 会创建 VPS 的 `temp_mail_messages` 表。当前 aiohttp 服务与 Mini App 共用启动开关，因此 `MINI_APP_ENABLED=true` 是 Webhook 监听 `127.0.0.1:8080` 的必要条件。运行后也可以在 Telegram 中逐个切换后端；数据库中的选择优先于上述初始映射。
 
 在现有 `cliapi.085580.xyz` HTTPS VirtualHost 中复用 Apache 证书并添加：
 
@@ -631,7 +696,7 @@ Value 使用以下 JSON 模板。只在 Cloudflare KV 中把 `<TEMP_MAIL_WEBHOOK
 }
 ```
 
-这是 **Admin Mail Webhook**，会处理所有域名的邮件。无需为 5 个域名分别创建 5 个 Webhook；所有邮件都发到同一个 URL，由 VPS 根据 `to` 和 `domain` 分类。
+这是 **Admin Mail Webhook**，会处理所有选择 Cloudflare 后端的域名。无需分别创建多个 Webhook；这些邮件都发到同一个 URL，由 VPS 根据 `to` 和 `domain` 分类。选择 Gmail 的域名不应指向 Worker，其邮件由 Gmail IMAP 读取。
 
 ### 18. 为什么不部署前端 Pages
 
@@ -717,10 +782,10 @@ Cloudflare 成功接收邮件
 
 ### 21. 多域名工作方式
 
-不需要一个域名一个 Worker、一个域名一个 Webhook，也不需要一个域名一张 PostgreSQL 表：
+对于选择 Cloudflare 后端的域名，不需要一个域名一个 Worker、一个域名一个 Webhook，也不需要一个域名一张 PostgreSQL 表：
 
 ```text
-5 个域名
+多个 CF TempMail 域名
     |
     v
 同一个 temp-mail-worker
@@ -732,7 +797,7 @@ Cloudflare 成功接收邮件
 同一个 temp_mail_messages
 ```
 
-VPS 使用 `to` 和 `domain` 区分邮件。当前代码只接受本节列出的 5 个域名；新增域名除了配置 Cloudflare，还需要同步更新 VPS 允许列表和 `LOGIN_EMAIL_ALIAS_DOMAINS`。
+VPS 使用 `to` 和 `domain` 区分邮件。允许域名来自 `LOGIN_EMAIL_ALIAS_DOMAINS` 以及 Bot 保存的运行时域名列表；Webhook 只保存当前标记为 `cloudflare` 的域名邮件。新增域名后，还要在 Telegram 的“邮箱域名管理”选择后端，并手动配置匹配的 Catch-all。
 
 ### 22. 常见故障排查
 
@@ -745,6 +810,8 @@ VPS 使用 `to` 和 `domain` 区分邮件。当前代码只接受本节列出的
 | Webhook 返回 403 | Cloudflare/Apache 的访问控制 | 检查 Cloudflare WAF、访问规则和 Apache 限制；VPS 应用自身对错误 secret 返回 401 |
 | Webhook 返回 413 | JSON 超过 5 MiB | 检查 `raw` 和附件导致的体积；当前服务明确限制请求大小 |
 | Worker 可访问但邮箱收不到信 | Email Routing 链路 | 检查 Enabled、邮件 DNS records、Catch-all Active，以及是否 Send to `temp-mail-worker` |
+| Telegram 选择与实际 Catch-all 不一致 | 域名后端映射 | CF 邮件落在 Gmail 或 Gmail 邮件发给 Worker 时，程序会去错误来源等待；先同步邮件路由，再在 Bot 中选择同一后端 |
+| Gmail 域名取码失败 | Gmail 转发和 IMAP | 确认目标地址已验证、Gmail 已收到邮件、应用专用密码有效，并点击“检查邮件接收” |
 | 主域能收但 `mail.085580.xyz` 不能收 | 子域 Email Routing | 在 `Email Routing → Settings → Subdomains` 单独启用 `mail.085580.xyz` 并配置 Catch-all |
 | Webhook `url` 为空 | 未部署 Pages、未设置 `FRONTEND_URL` | 当前 Backend-only 架构下属于正常现象，不能据此判断失败 |
 | VPS 收到并保存邮件，但 Telegram 换绑失败 | Telegram 域名策略或限流 | 查看 Bot 通知和 `journalctl`；`EMAIL_NOT_ALLOWED`、`FLOOD_WAIT` 不代表 Webhook 故障 |
@@ -802,14 +869,15 @@ npx wrangler deploy worker.js --name temp-mail-worker --compatibility-date <CURR
 - [ ] 与 Worker 版本匹配的 `schema.sql` 已执行
 - [ ] Worker `temp-mail-worker` 已部署
 - [ ] `nodejs_compat` 已启用
-- [ ] `DOMAINS` 已配置全部 5 个域名
+- [ ] Worker `DOMAINS` 已包含所有选择 CF TempMail 的域名
 - [ ] `JWT_SECRET` 已作为 Secret 配置
 - [ ] `ENABLE_USER_CREATE_EMAIL=true`
 - [ ] D1 Binding 名称为大写 `DB`
 - [ ] `/open_api/settings` 返回正常 JSON
-- [ ] 5 个域名的 Email Routing 均正常
+- [ ] 每个域名的 Email Routing/Catch-all 与 Telegram 中的后端选择一致
 - [ ] `mail.085580.xyz` 子域 Email Routing 已单独启用
-- [ ] 所有域名 Catch-all 均指向 `temp-mail-worker`
+- [ ] CF TempMail 域名 Catch-all 指向 `temp-mail-worker`
+- [ ] Gmail 域名 Catch-all 指向已验证的 Gmail 地址
 - [ ] KV `temp-mail-kv` 已创建
 - [ ] KV Binding 名称为大写 `KV`
 - [ ] `ENABLE_WEBHOOK=true`
@@ -823,6 +891,8 @@ npx wrangler deploy worker.js --name temp-mail-worker --compatibility-date <CURR
 - [ ] curl 模拟 Webhook 返回 HTTP 200
 - [ ] 真实外部邮件可以进入 PostgreSQL
 - [ ] `temp_mail_messages` 可以按完整 `to` 查询邮件
+- [ ] Telegram“邮箱域名管理”显示的每个后端均正确
+- [ ] “检查邮件接收”能够验证当前用到的全部后端
 
 ## 生产环境稳定运行
 

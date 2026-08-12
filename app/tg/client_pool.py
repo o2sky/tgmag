@@ -156,14 +156,14 @@ class ClientPool:
         self.clients.clear()
 
     async def check_login_email_health(self) -> bool:
-        """Validate the configured temp-mail store and retain the real runtime result."""
+        """Validate all email backends used by configured domains."""
         async with self._login_email_health_lock:
             self.login_email_health_checked_at = datetime.now(UTC)
             try:
                 await self.login_email_protector.reader.validate_connection()
             except Exception as exc:
                 self.login_email_health_error = f"{type(exc).__name__}: {str(exc)[:500]}"
-                logger.exception("Login email protection temp-mail health check failed")
+                logger.exception("Login email protection mail backend health check failed")
                 return False
             self.login_email_health_error = None
             return True

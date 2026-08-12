@@ -66,10 +66,18 @@ def test_security_center_separates_domains_whitelist_events_and_temp_mail() -> N
 
 
 def test_domain_deletion_requires_confirmation() -> None:
-    panel = login_email_domains_panel(("one.example", "two.example"), "one.example")
+    panel = login_email_domains_panel(
+        ("one.example", "two.example"),
+        "one.example",
+        {"one.example": "cloudflare", "two.example": "gmail"},
+    )
     callbacks = [button.callback_data for row in panel.inline_keyboard for button in row]
     assert "emailguard:deleteask:0" in callbacks
     assert "emailguard:delete:0" not in callbacks
+    assert "emailguard:backend:0" in callbacks
+    labels = [button.text for row in panel.inline_keyboard for button in row]
+    assert "☁️ CF TempMail" in labels
+    assert "✉️ Gmail" in labels
 
 
 def test_account_email_guard_has_window_setting_button() -> None:

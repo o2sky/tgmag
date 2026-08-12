@@ -1,6 +1,8 @@
 # 部署指南
 
-本文档给出一套可复制的 Debian 12 生产部署流程：独立系统用户、Python venv、PostgreSQL、systemd，以及可选的 Nginx HTTPS、Telegram Mini App 和 Cloudflare Temp Email 登录邮箱保护。
+<!-- markdownlint-disable MD013 -->
+
+本文档给出一套可复制的 Debian 12 生产部署流程：独立系统用户、Python venv、PostgreSQL、systemd，以及可选的 Nginx HTTPS、Telegram Mini App、Cloudflare Temp Email 和 Gmail 登录邮箱保护。每个收件域名可以独立选择 Cloudflare 或 Gmail 后端。
 
 示例部署目录为 `/opt/tg-account-bot`，服务用户为 `tg-account-bot`。命令中的域名、用户 ID、密码和 Token 都是占位值，必须替换。
 
@@ -21,7 +23,7 @@
 | 功能 | 还需要准备 |
 | --- | --- |
 | Mini App | 指向服务器的域名、开放的 80/443 端口、有效 HTTPS 证书 |
-| 登录邮箱保护 | 一个或多个 catch-all 域名、Cloudflare Temp Email、随机 Webhook secret |
+| 登录邮箱保护 | 一个或多个 catch-all 域名；按域名准备 Cloudflare Temp Email + Webhook secret，或 Gmail + 应用专用密码 |
 
 ## 2. 安装系统依赖和代码
 
@@ -107,11 +109,14 @@ LOG_LEVEL=INFO
 MINI_APP_ENABLED=false
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
+LOGIN_EMAIL_DOMAIN_BACKENDS=mail-a.example.com=cloudflare,mail-b.example.net=gmail
 TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
+LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
+LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 ```
 
 `.env` 由 Pydantic 在进程启动时读取。布尔值使用 `true`/`false`；列表使用英文逗号分隔，不要给整行额外套引号。
-登录邮箱保护默认开启，因此 Webhook secret 和至少一个 catch-all 域名也是最小配置的一部分；明确不使用该功能时才将开关设为 `false` 并省略这两项。
+登录邮箱保护默认开启，因此至少需要一个 catch-all 域名，并完整配置该域名所选后端的凭据。只用 Cloudflare 时可省略 Gmail 凭据，只用 Gmail 时可省略 Webhook secret；明确不使用该功能时将开关设为 `false`。
 
 ### 环境变量完整说明
 
@@ -136,7 +141,12 @@ TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
 | `MINI_APP_AUTH_MAX_AGE_SECONDS` | 否 | `3600`，Telegram initData 最大有效期 |
 | `LOGIN_EMAIL_PROTECTION_ENABLED` | 否 | `true`，是否自动更换登录邮箱；不使用时显式设为 `false` |
 | `LOGIN_EMAIL_ALIAS_DOMAINS` | 启用邮箱保护时 | catch-all 域名列表，第一个为初始默认值 |
-| `TEMP_MAIL_WEBHOOK_SECRET` | 启用邮箱保护时 | Cloudflare Temp Email Webhook 随机共享密钥 |
+| `LOGIN_EMAIL_DOMAIN_BACKENDS` | 推荐 | 初始按域名路由：`domain=cloudflare` 或 `domain=gmail`；运行后可在 Telegram 中切换 |
+| `TEMP_MAIL_WEBHOOK_SECRET` | 使用 Cloudflare 时 | Cloudflare Temp Email Webhook 随机共享密钥 |
+| `LOGIN_EMAIL_GMAIL_USERNAME` | 使用 Gmail 时 | 接收 catch-all 转发的 Gmail 地址 |
+| `LOGIN_EMAIL_GMAIL_APP_PASSWORD` | 使用 Gmail 时 | Gmail 应用专用密码 |
+| `LOGIN_EMAIL_IMAP_HOST` / `PORT` | 否 | `imap.gmail.com` / `993` |
+| `LOGIN_EMAIL_IMAP_FOLDER` | 否 | `INBOX` |
 | `LOGIN_EMAIL_SENDER` | 否 | `noreply@telegram.org` |
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | `300`，等待 catch-all 转发验证码；允许 30–7200 秒，等待期间不会重复发码 |
 | `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，数据库轮询间隔；允许 1–30 秒 |
@@ -277,17 +287,29 @@ curl -I https://bot.example.com/mini-app
 
 ### 9.1 邮件侧准备
 
-1. 准备至少一个由 Cloudflare Temp Email 接收任意 local-part 的域名，例如 `mail-a.example.com`。
-2. 生成随机 secret：`openssl rand -hex 32`。
-3. 在 HTTPS 反向代理中把 `/webhooks/temp-mail` 转发到内置 Web 服务。
-4. 在 Cloudflare Temp Email 中配置同一个 Webhook URL，并通过 `X-Temp-Mail-Secret` 请求头发送 secret。
+先为每个域名决定接收后端；同一部署可以混合使用：
+
+| 后端 | 邮件路由平台的 Catch-all | 程序读取方式 |
+| --- | --- | --- |
+| `cloudflare` | Send to Worker → Cloudflare Temp Email | Worker POST Webhook，程序读 PostgreSQL |
+| `gmail` | Send to email → 已验证的 Gmail 地址 | 程序通过 Gmail IMAP 读取 |
+
+Cloudflare 后端需要生成随机 secret（`openssl rand -hex 32`），把 `/webhooks/temp-mail` 通过现有 HTTPS 反向代理转发到内置 Web 服务，并在 Worker 全局 Webhook 中发送 `X-Temp-Mail-Secret`。完整 Worker、D1、KV、Email Routing 和 Apache 实例配置见 [README 的 Cloudflare 部署章节](README.md#tempmail--cloudflare-temp-email-部署backend-only)。
+
+Gmail 后端需要为接收账号启用两步验证并创建应用专用密码，再把该 Gmail 地址作为 Email Routing 的已验证目标。应用密码只保存在 `.env`，不能提交到仓库。
 
 配置示例：
 
 ```env
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
+LOGIN_EMAIL_DOMAIN_BACKENDS=mail-a.example.com=cloudflare,mail-b.example.net=gmail
 TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
+LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
+LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
+LOGIN_EMAIL_IMAP_HOST=imap.gmail.com
+LOGIN_EMAIL_IMAP_PORT=993
+LOGIN_EMAIL_IMAP_FOLDER=INBOX
 LOGIN_EMAIL_SENDER=noreply@telegram.org
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=300
 LOGIN_EMAIL_POLL_INTERVAL_SECONDS=3
@@ -304,12 +326,13 @@ sudo journalctl -u tg-account-bot -n 100 --no-pager
 ### 9.2 Bot 内验证
 
 1. 发送 `/security`。
-2. 使用“检查 Temp Mail”确认 secret 和邮件数据表可用。
-3. 检查域名列表，选择默认域名。
-4. 把本人会主动登录的账号加入白名单；这些账号仅转发提醒，不自动换绑。
-5. 对非白名单测试账号触发一次真实登录提醒，观察成功或失败通知。
+2. 打开“邮箱域名管理”，点击域名可选择默认域名；点击右侧 `CF TempMail` / `Gmail` 可切换该域名的读取后端。
+3. 确认 Telegram 显示的后端与邮件路由平台的实际 Catch-all 完全一致。
+4. 使用“检查邮件接收”验证当前所有域名使用到的后端。
+5. 把本人会主动登录的账号加入白名单；这些账号仅转发提醒，不自动换绑。
+6. 对非白名单测试账号触发一次真实登录提醒，观察成功或失败通知。
 
-环境变量只提供初始域名列表。一旦在 Bot 中增删域名，完整运行时列表和当前选择会保存在 PostgreSQL，后续以数据库值为准。若 Telegram 返回 `EMAIL_NOT_ALLOWED`，说明该域名不被接受；在失败通知下点击快捷换绑按钮，改选其他域名重试。
+环境变量提供初始域名、后端映射和凭据。Bot 中增删域名、当前默认域名和逐域名后端选择会保存在 PostgreSQL，后续以数据库值为准。程序不会代替管理员修改 Cloudflare Email Routing：应先手动更改 Catch-all，再在 Telegram 中切换后端。若 Telegram 返回 `EMAIL_NOT_ALLOWED`，说明该域名不被接受；在失败通知下点击快捷换绑按钮，改选其他域名重试。
 
 程序会校验邮件发件人、目标别名、Login 用途、邮件时间，以及标题和正文验证码是否一致。它不会因为白名单账号的提醒而换绑，也不会主动终止其他会话。
 
@@ -382,10 +405,12 @@ sudo journalctl -u tg-account-bot -n 200 --no-pager
 - 确认 8080 只在本机监听，并检查 `ss -lntp | grep 8080`。
 - 直接浏览器调用 API 缺少 Telegram `initData` 时会返回 401，这是预期行为。
 
-### Temp Mail Webhook 或取码失败
+### Cloudflare TempMail、Gmail 或取码失败
 
 - 确认 Cloudflare 请求头 `X-Temp-Mail-Secret` 与 `.env` 中的值完全一致。
 - 确认 Webhook 返回 HTTP 200，且 `to` 是允许域名下的完整收件地址。
+- Gmail 域名确认 catch-all 已投递到配置账号，应用专用密码有效且 IMAP 目录正确。
+- 在 Telegram 的“邮箱域名管理”确认每个域名选择的后端与实际 Catch-all 一致。
 - 确认发件人为配置的 `LOGIN_EMAIL_SENDER`。
 - 检查服务器时间是否准确；取码会校验数据库收件时间窗口。
 - Telegram 不接受域名时会通知失败，可从 InlineKeyboard 选择其他配置域名重试。

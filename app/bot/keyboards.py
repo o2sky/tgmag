@@ -356,7 +356,7 @@ def login_email_guard_panel() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="最近保护事件", callback_data="emailguard:events"),
-                InlineKeyboardButton(text="检查 Temp Mail", callback_data="emailguard:testimap"),
+                InlineKeyboardButton(text="检查邮件接收", callback_data="emailguard:testimap"),
             ],
             [
                 InlineKeyboardButton(
@@ -372,10 +372,14 @@ def login_email_guard_panel() -> InlineKeyboardMarkup:
 def login_email_domains_panel(
     domains: tuple[str, ...],
     selected_domain: str | None,
+    domain_backends: dict[str, str] | None = None,
 ) -> InlineKeyboardMarkup:
+    domain_backends = domain_backends or {}
     rows: list[list[InlineKeyboardButton]] = []
     for index, domain in enumerate(domains):
         marker = "✅" if domain == selected_domain else "○"
+        backend = domain_backends.get(domain, "cloudflare")
+        backend_text = "☁️ CF TempMail" if backend == "cloudflare" else "✉️ Gmail"
         rows.append(
             [
                 InlineKeyboardButton(
@@ -383,9 +387,17 @@ def login_email_domains_panel(
                     callback_data=f"emailguard:domain:{index}",
                 ),
                 InlineKeyboardButton(
-                    text="删除",
-                    callback_data=f"emailguard:deleteask:{index}",
+                    text=backend_text,
+                    callback_data=f"emailguard:backend:{index}",
                 ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"删除 @{domain}",
+                    callback_data=f"emailguard:deleteask:{index}",
+                )
             ]
         )
     rows.append([InlineKeyboardButton(text="添加邮箱域名", callback_data="emailguard:add")])

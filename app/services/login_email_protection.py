@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telethon import TelegramClient
 from telethon.errors import FloodError
 
-from app.config import settings
+from app.config import normalize_email_backend, settings
 from app.db.models import (
     AccountSecurity,
     LoginEmailProtectionEvent,
@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 SELECTED_DOMAIN_KEY = "login_email_protection.selected_domain"
 DOMAINS_KEY = "login_email_protection.domains"
+DOMAIN_BACKENDS_KEY = "login_email_protection.domain_backends"
+EMAIL_BACKEND_CLOUDFLARE = "cloudflare"
+EMAIL_BACKEND_GMAIL = "gmail"
+EMAIL_BACKEND_LABELS = {
+    EMAIL_BACKEND_CLOUDFLARE: "Cloudflare TempMail",
+    EMAIL_BACKEND_GMAIL: "Gmail",
+}
 DOMAIN_PATTERN = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -432,6 +439,52 @@ class TempMailCodeReader:
         raise TimeoutError("等待 Telegram 登录邮箱验证码超时")
 
 
+class RoutedCodeReader:
+    """Select the configured inbox reader from the target email domain."""
+
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+        self.sessionmaker = sessionmaker
+        self.readers = {
+            EMAIL_BACKEND_CLOUDFLARE: TempMailCodeReader(sessionmaker),
+            EMAIL_BACKEND_GMAIL: GmailCodeReader(),
+        }
+
+    async def validate_connection(self) -> None:
+        async with self.sessionmaker() as session:
+            routes = await get_domain_backends(session)
+        if not routes:
+            raise RuntimeError("没有配置登录邮箱域名")
+        for backend in sorted(set(routes.values())):
+            if backend not in settings.configured_login_email_backends:
+                raise RuntimeError(f"{email_backend_label(backend)} 凭据未配置")
+            try:
+                await self.readers[backend].validate_connection()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{email_backend_label(backend)} 检查失败：{type(exc).__name__}: {str(exc)[:300]}"
+                ) from exc
+
+    async def wait_for_code(
+        self,
+        target_email: str,
+        requested_at: datetime,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        try:
+            _, domain = target_email.lower().rsplit("@", 1)
+        except ValueError as exc:
+            raise ValueError("目标邮箱地址格式无效") from exc
+        async with self.sessionmaker() as session:
+            backend = await get_domain_backend(session, domain)
+        reader = self.readers[backend]
+        logger.info(
+            "Waiting for login email through %s for domain %s",
+            email_backend_label(backend),
+            domain,
+        )
+        return await reader.wait_for_code(target_email, requested_at, timeout_seconds)
+
+
 def normalize_domain(domain: str) -> str:
     normalized = domain.strip().lower().lstrip("@")
     if not DOMAIN_PATTERN.fullmatch(normalized):
@@ -464,12 +517,96 @@ async def _store_available_domains(session: AsyncSession, domains: tuple[str, ..
         row.value = payload
 
 
-async def add_available_domain(session: AsyncSession, domain: str) -> str:
+def email_backend_label(backend: str) -> str:
+    return EMAIL_BACKEND_LABELS.get(backend, backend)
+
+
+def _fallback_domain_backend(domain: str) -> str:
+    return settings.login_email_domain_backends.get(
+        domain,
+        settings.default_login_email_backend,
+    )
+
+
+async def get_domain_backends(session: AsyncSession) -> dict[str, str]:
+    domains = await get_available_domains(session)
+    stored: dict[str, str] = {}
+    row = await session.get(RuntimeSetting, DOMAIN_BACKENDS_KEY)
+    if row is not None:
+        try:
+            values = json.loads(row.value)
+            if not isinstance(values, dict):
+                raise ValueError("domain backend setting is not an object")
+            stored = {
+                normalize_domain(str(domain)): normalize_email_backend(str(backend))
+                for domain, backend in values.items()
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.error("Stored login email domain backend map is invalid; using defaults")
+            stored = {}
+    return {
+        domain: stored.get(domain, _fallback_domain_backend(domain))
+        for domain in domains
+    }
+
+
+async def get_domain_backend(session: AsyncSession, domain: str) -> str:
+    normalized = normalize_domain(domain)
+    routes = await get_domain_backends(session)
+    if normalized not in routes:
+        raise ValueError("邮箱域名不在当前允许列表中")
+    return routes[normalized]
+
+
+async def _store_domain_backends(session: AsyncSession, routes: dict[str, str]) -> None:
+    normalized_routes = {
+        normalize_domain(domain): normalize_email_backend(backend)
+        for domain, backend in routes.items()
+    }
+    row = await session.get(RuntimeSetting, DOMAIN_BACKENDS_KEY)
+    payload = json.dumps(normalized_routes, ensure_ascii=True, sort_keys=True)
+    if row is None:
+        session.add(RuntimeSetting(key=DOMAIN_BACKENDS_KEY, value=payload))
+    else:
+        row.value = payload
+
+
+async def set_domain_backend(session: AsyncSession, domain: str, backend: str) -> None:
+    normalized_domain = normalize_domain(domain)
+    normalized_backend = normalize_email_backend(backend)
+    if normalized_domain not in await get_available_domains(session):
+        raise ValueError("邮箱域名不在当前允许列表中")
+    if normalized_backend not in settings.configured_login_email_backends:
+        missing = (
+            "TEMP_MAIL_WEBHOOK_SECRET"
+            if normalized_backend == EMAIL_BACKEND_CLOUDFLARE
+            else "LOGIN_EMAIL_GMAIL_USERNAME / LOGIN_EMAIL_GMAIL_APP_PASSWORD"
+        )
+        raise ValueError(f"{email_backend_label(normalized_backend)} 尚未配置：缺少 {missing}")
+    routes = await get_domain_backends(session)
+    routes[normalized_domain] = normalized_backend
+    await _store_domain_backends(session, routes)
+    await session.commit()
+
+
+async def add_available_domain(
+    session: AsyncSession,
+    domain: str,
+    backend: str | None = None,
+) -> str:
     normalized = normalize_domain(domain)
     domains = await get_available_domains(session)
     if normalized in domains:
         raise ValueError("该邮箱域名已经存在")
+    normalized_backend = normalize_email_backend(
+        backend or _fallback_domain_backend(normalized)
+    )
+    if normalized_backend not in settings.configured_login_email_backends:
+        raise ValueError(f"{email_backend_label(normalized_backend)} 尚未完成凭据配置")
     await _store_available_domains(session, (*domains, normalized))
+    routes = await get_domain_backends(session)
+    routes[normalized] = normalized_backend
+    await _store_domain_backends(session, routes)
     await session.commit()
     return normalized
 
@@ -483,6 +620,9 @@ async def delete_available_domain(session: AsyncSession, domain: str) -> None:
     if not remaining:
         raise ValueError("至少需要保留一个邮箱域名")
     await _store_available_domains(session, remaining)
+    routes = await get_domain_backends(session)
+    routes.pop(normalized, None)
+    await _store_domain_backends(session, routes)
     selected = await session.get(RuntimeSetting, SELECTED_DOMAIN_KEY)
     if selected is not None and selected.value == normalized:
         selected.value = remaining[0]
@@ -544,11 +684,11 @@ class LoginEmailProtector:
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         bot: Bot,
-        reader: GmailCodeReader | TempMailCodeReader | None = None,
+        reader: GmailCodeReader | TempMailCodeReader | RoutedCodeReader | None = None,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.bot = bot
-        self.reader = reader or TempMailCodeReader(sessionmaker)
+        self.reader = reader or RoutedCodeReader(sessionmaker)
         self._account_locks: dict[int, asyncio.Lock] = {}
         self._change_locks: dict[int, asyncio.Lock] = {}
         self._window_waiters: dict[int, asyncio.Task[None]] = {}
@@ -911,9 +1051,9 @@ class LoginEmailProtector:
         if isinstance(exc, TimeoutError):
             minutes = max(1, settings.login_email_poll_timeout_seconds // 60)
             return (
-                f"卡点：Telegram 已受理发码，但 Temp Mail Webhook 在 {minutes} 分钟内"
-                "未收到匹配的验证码邮件。请检查 Cloudflare Temp Email 的 Webhook 投递记录、"
-                "HTTP 状态码和收件地址。"
+                f"卡点：Telegram 已受理发码，但所选邮件接收链路在 {minutes} 分钟内"
+                "未收到匹配的验证码邮件。请按该域名配置检查 Cloudflare TempMail Webhook "
+                "投递记录，或 Gmail 转发/IMAP 状态及收件地址。"
                 "本次请求未自动重发，请等待投递恢复后再手动重试"
             )
         return str(exc)

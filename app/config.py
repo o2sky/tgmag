@@ -9,6 +9,42 @@ from typing import Annotated
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+EMAIL_BACKEND_ALIASES = {
+    "cloudflare": "cloudflare",
+    "cf": "cloudflare",
+    "cf-tempmail": "cloudflare",
+    "temp-mail": "cloudflare",
+    "tempmail": "cloudflare",
+    "gmail": "gmail",
+}
+
+
+def normalize_email_backend(value: str) -> str:
+    normalized = EMAIL_BACKEND_ALIASES.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError("email backend must be cloudflare or gmail")
+    return normalized
+
+
+def parse_domain_backends(value: str) -> dict[str, str]:
+    routes: dict[str, str] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError("LOGIN_EMAIL_DOMAIN_BACKENDS entries must use domain=backend")
+        domain, backend = item.split("=", 1)
+        normalized_domain = domain.strip().lower().lstrip("@")
+        if not normalized_domain:
+            raise ValueError("LOGIN_EMAIL_DOMAIN_BACKENDS contains an empty domain")
+        if normalized_domain in routes:
+            raise ValueError(
+                f"LOGIN_EMAIL_DOMAIN_BACKENDS contains duplicate domain: {normalized_domain}"
+            )
+        routes[normalized_domain] = normalize_email_backend(backend)
+    return routes
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -34,6 +70,7 @@ class Settings(BaseSettings):
     mini_app_auth_max_age_seconds: int = Field(default=3600, ge=60, le=86400, alias="MINI_APP_AUTH_MAX_AGE_SECONDS")
     login_email_protection_enabled: bool = Field(default=True, alias="LOGIN_EMAIL_PROTECTION_ENABLED")
     login_email_alias_domains_raw: str = Field(default="", alias="LOGIN_EMAIL_ALIAS_DOMAINS")
+    login_email_domain_backends_raw: str = Field(default="", alias="LOGIN_EMAIL_DOMAIN_BACKENDS")
     temp_mail_webhook_secret: str = Field(default="", alias="TEMP_MAIL_WEBHOOK_SECRET")
     login_email_gmail_username: str = Field(default="", alias="LOGIN_EMAIL_GMAIL_USERNAME")
     login_email_gmail_app_password: str = Field(default="", alias="LOGIN_EMAIL_GMAIL_APP_PASSWORD")
@@ -78,6 +115,12 @@ class Settings(BaseSettings):
             raise ValueError("LOGIN_EMAIL_ALIAS_DOMAINS contains duplicates")
         return ",".join(domains)
 
+    @field_validator("login_email_domain_backends_raw")
+    @classmethod
+    def validate_login_email_domain_backends(cls, value: str) -> str:
+        routes = parse_domain_backends(value)
+        return ",".join(f"{domain}={backend}" for domain, backend in routes.items())
+
     @field_validator("login_email_gmail_username")
     @classmethod
     def normalize_gmail_username(cls, value: str) -> str:
@@ -99,13 +142,37 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_login_email_protection(self) -> Settings:
         if self.login_email_protection_enabled:
-            required = {
-                "LOGIN_EMAIL_ALIAS_DOMAINS": self.login_email_alias_domains_raw,
-                "TEMP_MAIL_WEBHOOK_SECRET": self.temp_mail_webhook_secret,
-            }
-            missing = [name for name, value in required.items() if not value.strip()]
-            if missing:
-                raise ValueError(f"login email protection is enabled but missing: {', '.join(missing)}")
+            if not self.login_email_alias_domains_raw:
+                raise ValueError(
+                    "login email protection is enabled but missing: LOGIN_EMAIL_ALIAS_DOMAINS"
+                )
+            gmail_values = (
+                self.login_email_gmail_username,
+                self.login_email_gmail_app_password,
+            )
+            gmail_configured = all(gmail_values)
+            if any(gmail_values) and not gmail_configured:
+                raise ValueError(
+                    "LOGIN_EMAIL_GMAIL_USERNAME and LOGIN_EMAIL_GMAIL_APP_PASSWORD "
+                    "must be configured together"
+                )
+            cloudflare_configured = bool(self.temp_mail_webhook_secret)
+            if not gmail_configured and not cloudflare_configured:
+                raise ValueError(
+                    "login email protection requires Gmail credentials or "
+                    "TEMP_MAIL_WEBHOOK_SECRET"
+                )
+            domains = set(self.login_email_alias_domains)
+            for domain, backend in self.login_email_domain_backends.items():
+                if domain not in domains:
+                    raise ValueError(
+                        f"LOGIN_EMAIL_DOMAIN_BACKENDS contains a domain not listed in "
+                        f"LOGIN_EMAIL_ALIAS_DOMAINS: {domain}"
+                    )
+                if backend == "gmail" and not gmail_configured:
+                    raise ValueError(f"Gmail credentials are required for domain: {domain}")
+                if backend == "cloudflare" and not cloudflare_configured:
+                    raise ValueError(f"TEMP_MAIL_WEBHOOK_SECRET is required for domain: {domain}")
         return self
 
     @cached_property
@@ -122,6 +189,25 @@ class Settings(BaseSettings):
     @cached_property
     def login_email_alias_domains(self) -> tuple[str, ...]:
         return tuple(item for item in self.login_email_alias_domains_raw.split(",") if item)
+
+    @property
+    def login_email_domain_backends(self) -> dict[str, str]:
+        return parse_domain_backends(self.login_email_domain_backends_raw)
+
+    @property
+    def configured_login_email_backends(self) -> frozenset[str]:
+        backends: set[str] = set()
+        if self.temp_mail_webhook_secret:
+            backends.add("cloudflare")
+        if self.login_email_gmail_username and self.login_email_gmail_app_password:
+            backends.add("gmail")
+        return frozenset(backends)
+
+    @property
+    def default_login_email_backend(self) -> str:
+        if "cloudflare" in self.configured_login_email_backends:
+            return "cloudflare"
+        return "gmail"
 
 
 settings = Settings()

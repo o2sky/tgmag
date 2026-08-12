@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db.models import TgSession
 from app.services.login_email_protection import (
+    email_backend_label,
     get_available_domains,
+    get_domain_backends,
     get_selected_domain,
     get_whitelist_ids,
 )
@@ -84,6 +86,7 @@ async def run_security_health_check(
     try:
         await session.execute(text("SELECT 1"))
         domains = await get_available_domains(session)
+        domain_backends = await get_domain_backends(session)
         selected_domain = await get_selected_domain(session)
         whitelist_ids = await get_whitelist_ids(session)
         active_account_ids = set(
@@ -115,13 +118,20 @@ async def run_security_health_check(
         )
     )
 
-    credentials_ready = bool(settings.temp_mail_webhook_secret)
+    required_backends = set(domain_backends.values())
+    configured_backends = settings.configured_login_email_backends
+    credentials_ready = bool(required_backends) and required_backends.issubset(
+        configured_backends
+    )
     checks.append(
         _check(
-            "Temp Mail Webhook 配置",
+            "邮件接收后端配置",
             credentials_ready,
-            "Webhook secret 已加载" if credentials_ready else "Webhook secret 缺失",
-            "在 .env 配置 TEMP_MAIL_WEBHOOK_SECRET，然后重启服务。",
+            "、".join(email_backend_label(item) for item in sorted(required_backends))
+            + " 凭据已加载"
+            if credentials_ready
+            else "域名使用的 Cloudflare TempMail 或 Gmail 后端凭据不完整",
+            "按域名选择配置 TEMP_MAIL_WEBHOOK_SECRET 或 Gmail IMAP 凭据，然后重启服务。",
         )
     )
 
@@ -133,29 +143,29 @@ async def run_security_health_check(
             f"当前域名 @{selected_domain}，共 {len(domains)} 个候选域名"
             if domain_ready
             else "没有有效的当前域名，或当前域名不在候选列表中",
-            "进入“邮箱域名管理”添加允许的 Temp Mail 域名并点选一个当前域名。",
+            "进入“邮箱域名管理”添加域名、选择接收后端并点选一个当前域名。",
         )
     )
 
     if credentials_ready:
-        temp_mail_ok = await client_pool.check_login_email_health()
-        temp_mail_error = getattr(client_pool, "login_email_health_error", None)
+        mail_reader_ok = await client_pool.check_login_email_health()
+        mail_reader_error = getattr(client_pool, "login_email_health_error", None)
         checks.append(
             _check(
-                "Temp Mail 存储实测",
-                temp_mail_ok and not temp_mail_error,
-                "Webhook secret 和邮件数据表可用"
-                if temp_mail_ok and not temp_mail_error
-                else f"检测失败：{temp_mail_error or '未知错误'}",
-                "确认 TEMP_MAIL_WEBHOOK_SECRET 已配置、数据库迁移已执行，并检查服务日志。",
+                "邮件接收链路实测",
+                mail_reader_ok and not mail_reader_error,
+                "当前域名使用到的 Cloudflare TempMail / Gmail 后端均可用"
+                if mail_reader_ok and not mail_reader_error
+                else f"检测失败：{mail_reader_error or '未知错误'}",
+                "检查所选后端的 Webhook 数据表或 Gmail IMAP 凭据，并查看服务日志。",
             )
         )
     else:
         checks.append(
             _warning(
-                "Temp Mail 存储实测",
-                "因 Webhook secret 缺失而跳过",
-                "先配置 TEMP_MAIL_WEBHOOK_SECRET，再重新点击检测。",
+                "邮件接收链路实测",
+                "因所需后端凭据不完整而跳过",
+                "先配置域名选择对应的 Cloudflare 或 Gmail 凭据，再重新点击检测。",
             )
         )
 
