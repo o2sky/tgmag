@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     mini_app_auth_max_age_seconds: int = Field(default=3600, ge=60, le=86400, alias="MINI_APP_AUTH_MAX_AGE_SECONDS")
     login_email_protection_enabled: bool = Field(default=True, alias="LOGIN_EMAIL_PROTECTION_ENABLED")
     login_email_alias_domains_raw: str = Field(default="", alias="LOGIN_EMAIL_ALIAS_DOMAINS")
+    temp_mail_webhook_secret: str = Field(default="", alias="TEMP_MAIL_WEBHOOK_SECRET")
     login_email_gmail_username: str = Field(default="", alias="LOGIN_EMAIL_GMAIL_USERNAME")
     login_email_gmail_app_password: str = Field(default="", alias="LOGIN_EMAIL_GMAIL_APP_PASSWORD")
     login_email_imap_host: str = Field(default="imap.gmail.com", alias="LOGIN_EMAIL_IMAP_HOST")
@@ -87,13 +88,20 @@ class Settings(BaseSettings):
     def normalize_gmail_app_password(cls, value: str) -> str:
         return "".join(value.split())
 
+    @field_validator("temp_mail_webhook_secret")
+    @classmethod
+    def validate_temp_mail_webhook_secret(cls, value: str) -> str:
+        secret = value.strip()
+        if secret and (len(secret) < 32 or any(character.isspace() for character in secret)):
+            raise ValueError("TEMP_MAIL_WEBHOOK_SECRET must be at least 32 non-whitespace characters")
+        return secret
+
     @model_validator(mode="after")
     def validate_login_email_protection(self) -> Settings:
         if self.login_email_protection_enabled:
             required = {
                 "LOGIN_EMAIL_ALIAS_DOMAINS": self.login_email_alias_domains_raw,
-                "LOGIN_EMAIL_GMAIL_USERNAME": self.login_email_gmail_username,
-                "LOGIN_EMAIL_GMAIL_APP_PASSWORD": self.login_email_gmail_app_password,
+                "TEMP_MAIL_WEBHOOK_SECRET": self.temp_mail_webhook_secret,
             }
             missing = [name for name, value in required.items() if not value.strip()]
             if missing:

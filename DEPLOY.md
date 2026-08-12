@@ -1,6 +1,6 @@
 # 部署指南
 
-本文档给出一套可复制的 Debian 12 生产部署流程：独立系统用户、Python venv、PostgreSQL、systemd，以及可选的 Nginx HTTPS、Telegram Mini App 和 Gmail 登录邮箱保护。
+本文档给出一套可复制的 Debian 12 生产部署流程：独立系统用户、Python venv、PostgreSQL、systemd，以及可选的 Nginx HTTPS、Telegram Mini App 和 Cloudflare Temp Email 登录邮箱保护。
 
 示例部署目录为 `/opt/tg-account-bot`，服务用户为 `tg-account-bot`。命令中的域名、用户 ID、密码和 Token 都是占位值，必须替换。
 
@@ -21,7 +21,7 @@
 | 功能 | 还需要准备 |
 | --- | --- |
 | Mini App | 指向服务器的域名、开放的 80/443 端口、有效 HTTPS 证书 |
-| 登录邮箱保护 | 一个或多个 catch-all 域名、接收转发邮件的 Gmail、Gmail 应用专用密码 |
+| 登录邮箱保护 | 一个或多个 catch-all 域名、Cloudflare Temp Email、随机 Webhook secret |
 
 ## 2. 安装系统依赖和代码
 
@@ -107,12 +107,11 @@ LOG_LEVEL=INFO
 MINI_APP_ENABLED=false
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
-LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
-LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
+TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
 ```
 
 `.env` 由 Pydantic 在进程启动时读取。布尔值使用 `true`/`false`；列表使用英文逗号分隔，不要给整行额外套引号。
-登录邮箱保护默认开启，因此 Gmail 凭据和至少一个 catch-all 域名也是最小配置的一部分；明确不使用该功能时才将开关设为 `false` 并省略这三项。
+登录邮箱保护默认开启，因此 Webhook secret 和至少一个 catch-all 域名也是最小配置的一部分；明确不使用该功能时才将开关设为 `false` 并省略这两项。
 
 ### 环境变量完整说明
 
@@ -137,13 +136,10 @@ LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 | `MINI_APP_AUTH_MAX_AGE_SECONDS` | 否 | `3600`，Telegram initData 最大有效期 |
 | `LOGIN_EMAIL_PROTECTION_ENABLED` | 否 | `true`，是否自动更换登录邮箱；不使用时显式设为 `false` |
 | `LOGIN_EMAIL_ALIAS_DOMAINS` | 启用邮箱保护时 | catch-all 域名列表，第一个为初始默认值 |
-| `LOGIN_EMAIL_GMAIL_USERNAME` | 启用邮箱保护时 | 接收转发邮件的 Gmail 地址 |
-| `LOGIN_EMAIL_GMAIL_APP_PASSWORD` | 启用邮箱保护时 | Gmail 应用专用密码，不是账号主密码 |
-| `LOGIN_EMAIL_IMAP_HOST` / `PORT` | 否 | `imap.gmail.com` / `993` |
-| `LOGIN_EMAIL_IMAP_FOLDER` | 否 | `INBOX` |
+| `TEMP_MAIL_WEBHOOK_SECRET` | 启用邮箱保护时 | Cloudflare Temp Email Webhook 随机共享密钥 |
 | `LOGIN_EMAIL_SENDER` | 否 | `noreply@telegram.org` |
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | `300`，等待 catch-all 转发验证码；允许 30–7200 秒，等待期间不会重复发码 |
-| `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，IMAP 轮询间隔；允许 1–30 秒 |
+| `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，数据库轮询间隔；允许 1–30 秒 |
 | `LOGIN_EMAIL_CATCHUP_SECONDS` | 否 | `180`，服务重连时补拉近期登录提醒的时间窗口 |
 
 每个 TG 账号的等待窗口在 Mini App 账号详情的“登录邮箱保护”中独立设置，单位为整数小时，允许 `0–720`，默认 `0`（收到有效登录提醒后立即换绑）。大于 `0` 时，窗口内的新提醒仍逐条转发给管理员，只累计次数且不会延长窗口；到期后执行一次换绑并发送汇总结果。修改只影响之后的新窗口，服务重启后会恢复尚未结束的窗口。catch-all 转发可能延迟，系统在等待邮件期间不会重复发码，避免触发 Telegram 尝试次数限制。
@@ -281,29 +277,24 @@ curl -I https://bot.example.com/mini-app
 
 ### 9.1 邮件侧准备
 
-1. 准备至少一个 catch-all 域名，例如 `mail-a.example.com`。
-2. 将该域名下所有收件地址转发到同一个 Gmail。
-3. 确认转发后的原始邮件头仍保留目标别名，至少能从 `To`、`Delivered-To`、`X-Original-To` 或 `Envelope-To` 中找到。
-4. 为 Google 账号启用两步验证并创建应用专用密码。
-5. 不要使用 Google 账号主密码。
+1. 准备至少一个由 Cloudflare Temp Email 接收任意 local-part 的域名，例如 `mail-a.example.com`。
+2. 生成随机 secret：`openssl rand -hex 32`。
+3. 在 HTTPS 反向代理中把 `/webhooks/temp-mail` 转发到内置 Web 服务。
+4. 在 Cloudflare Temp Email 中配置同一个 Webhook URL，并通过 `X-Temp-Mail-Secret` 请求头发送 secret。
 
 配置示例：
 
 ```env
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
-LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
-LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_app_password
-LOGIN_EMAIL_IMAP_HOST=imap.gmail.com
-LOGIN_EMAIL_IMAP_PORT=993
-LOGIN_EMAIL_IMAP_FOLDER=INBOX
+TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
 LOGIN_EMAIL_SENDER=noreply@telegram.org
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=300
 LOGIN_EMAIL_POLL_INTERVAL_SECONDS=3
 LOGIN_EMAIL_CATCHUP_SECONDS=180
 ```
 
-应用专用密码中即使带空格，程序也会在读取时移除空白。保存后重启服务：
+保存后重启服务：
 
 ```bash
 sudo systemctl restart tg-account-bot
@@ -313,7 +304,7 @@ sudo journalctl -u tg-account-bot -n 100 --no-pager
 ### 9.2 Bot 内验证
 
 1. 发送 `/security`。
-2. 使用“检查 Gmail”确认 IMAP 登录成功。
+2. 使用“检查 Temp Mail”确认 secret 和邮件数据表可用。
 3. 检查域名列表，选择默认域名。
 4. 把本人会主动登录的账号加入白名单；这些账号仅转发提醒，不自动换绑。
 5. 对非白名单测试账号触发一次真实登录提醒，观察成功或失败通知。
@@ -328,7 +319,7 @@ sudo journalctl -u tg-account-bot -n 100 --no-pager
 - `.env`、`data/sessions`、`data/backups` 保持仅服务用户可读写。
 - Telegram StringSession 等同于登录凭证，导出后应加密保存并及时删除临时副本。
 - 管理员账号应启用 Telegram 2FA，并限制 `ADMIN_IDS`。
-- 定期轮换 Bot Token、数据库密码和 Gmail 应用专用密码；轮换 Fernet 密钥需要专门的数据重加密迁移，不能直接替换。
+- 定期轮换 Bot Token、数据库密码和 Webhook secret；轮换 Fernet 密钥需要专门的数据重加密迁移，不能直接替换。
 
 ## 11. 备份与恢复
 
@@ -391,12 +382,12 @@ sudo journalctl -u tg-account-bot -n 200 --no-pager
 - 确认 8080 只在本机监听，并检查 `ss -lntp | grep 8080`。
 - 直接浏览器调用 API 缺少 Telegram `initData` 时会返回 401，这是预期行为。
 
-### Gmail 连接或取码失败
+### Temp Mail Webhook 或取码失败
 
-- 确认使用应用专用密码，不是 Google 主密码。
-- 确认转发邮件保留了目标别名邮件头。
+- 确认 Cloudflare 请求头 `X-Temp-Mail-Secret` 与 `.env` 中的值完全一致。
+- 确认 Webhook 返回 HTTP 200，且 `to` 是允许域名下的完整收件地址。
 - 确认发件人为配置的 `LOGIN_EMAIL_SENDER`。
-- 检查服务器时间是否准确；取码会校验邮件时间窗口。
+- 检查服务器时间是否准确；取码会校验数据库收件时间窗口。
 - Telegram 不接受域名时会通知失败，可从 InlineKeyboard 选择其他配置域名重试。
 
 ### 检查当前版本与迁移

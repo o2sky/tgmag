@@ -331,7 +331,7 @@ async function runSecurityCheck() {
   const button = qs("#securityCheckBtn");
   setBusy(button, true, "正在逐项检测…");
   qs("#healthTitle").textContent = "正在验证真实运行链路";
-  qs("#healthDescription").textContent = "正在连接数据库、Gmail IMAP，并核对监听任务和全部 active 账号连接。";
+  qs("#healthDescription").textContent = "正在连接数据库、Temp Mail 存储，并核对监听任务和全部 active 账号连接。";
   try {
     const data = await api("/security-health");
     qs("#healthIcon").className = `health-icon ${data.available ? "pass" : "fail"}`;

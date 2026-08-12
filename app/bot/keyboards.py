@@ -356,7 +356,7 @@ def login_email_guard_panel() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="最近保护事件", callback_data="emailguard:events"),
-                InlineKeyboardButton(text="检查 Gmail", callback_data="emailguard:testimap"),
+                InlineKeyboardButton(text="检查 Temp Mail", callback_data="emailguard:testimap"),
             ],
             [
                 InlineKeyboardButton(

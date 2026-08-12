@@ -31,6 +31,7 @@ from app.db.models import (
     LoginEmailWhitelist,
     RuntimeSetting,
     ServiceMessage,
+    TempMailMessage,
     TgAccount,
 )
 from app.services.crypto import decrypt_text, encrypt_text
@@ -359,6 +360,78 @@ class GmailCodeReader:
             raise
 
 
+class TempMailCodeReader:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+        self.sessionmaker = sessionmaker
+
+    async def validate_connection(self) -> None:
+        if not settings.temp_mail_webhook_secret:
+            raise RuntimeError("TEMP_MAIL_WEBHOOK_SECRET is not configured")
+        async with self.sessionmaker() as session:
+            await session.execute(select(TempMailMessage.id).limit(1))
+
+    @staticmethod
+    def _extract_code(message: TempMailMessage, target_email: str) -> str | None:
+        senders = {
+            address.lower()
+            for _, address in getaddresses([message.sender or ""])
+            if address
+        }
+        if settings.login_email_sender.lower() not in senders:
+            return None
+        if message.recipient.lower() != target_email.lower():
+            return None
+        subject = message.subject or ""
+        body = message.parsed_text or message.raw or message.parsed_html or ""
+        combined = f"{subject}\n{body}"
+        if not EMAIL_LOGIN_PURPOSE_PATTERN.search(combined):
+            return None
+        body_match = EMAIL_BODY_CODE_PATTERN.search(body)
+        subject_match = EMAIL_SUBJECT_CODE_PATTERN.search(subject)
+        if body_match is None:
+            return None
+        if subject_match is not None and subject_match.group(1) != body_match.group(1):
+            return None
+        return body_match.group(1)
+
+    async def wait_for_code(
+        self,
+        target_email: str,
+        requested_at: datetime,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        timeout = (
+            settings.login_email_poll_timeout_seconds
+            if timeout_seconds is None
+            else max(0, timeout_seconds)
+        )
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=UTC)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            async with self.sessionmaker() as session:
+                messages = list(
+                    (
+                        await session.scalars(
+                            select(TempMailMessage)
+                            .where(
+                                TempMailMessage.recipient == target_email.lower(),
+                                TempMailMessage.received_at >= requested_at,
+                            )
+                            .order_by(TempMailMessage.received_at.desc())
+                            .limit(100)
+                        )
+                    ).all()
+                )
+            for message in messages:
+                if code := self._extract_code(message, target_email):
+                    return code
+            await asyncio.sleep(
+                min(settings.login_email_poll_interval_seconds, max(0, deadline - time.monotonic()))
+            )
+        raise TimeoutError("等待 Telegram 登录邮箱验证码超时")
+
+
 def normalize_domain(domain: str) -> str:
     normalized = domain.strip().lower().lstrip("@")
     if not DOMAIN_PATTERN.fullmatch(normalized):
@@ -471,11 +544,11 @@ class LoginEmailProtector:
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         bot: Bot,
-        reader: GmailCodeReader | None = None,
+        reader: GmailCodeReader | TempMailCodeReader | None = None,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.bot = bot
-        self.reader = reader or GmailCodeReader()
+        self.reader = reader or TempMailCodeReader(sessionmaker)
         self._account_locks: dict[int, asyncio.Lock] = {}
         self._change_locks: dict[int, asyncio.Lock] = {}
         self._window_waiters: dict[int, asyncio.Task[None]] = {}
@@ -838,9 +911,9 @@ class LoginEmailProtector:
         if isinstance(exc, TimeoutError):
             minutes = max(1, settings.login_email_poll_timeout_seconds // 60)
             return (
-                f"卡点：Telegram 已受理发码，但 Gmail 在 {minutes} 分钟内未收到验证码邮件。"
-                "请打开 Cloudflare Email Routing 控制台 → Activity，查看目标地址的"
-                "投递记录；若出现 Gmail 421/4.7.28，表示 Gmail 正在临时限流。"
+                f"卡点：Telegram 已受理发码，但 Temp Mail Webhook 在 {minutes} 分钟内"
+                "未收到匹配的验证码邮件。请检查 Cloudflare Temp Email 的 Webhook 投递记录、"
+                "HTTP 状态码和收件地址。"
                 "本次请求未自动重发，请等待投递恢复后再手动重试"
             )
         return str(exc)

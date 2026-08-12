@@ -241,6 +241,32 @@ class LoginEmailProtectionEvent(Base):
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class TempMailMessage(Base):
+    __tablename__ = "temp_mail_messages"
+    __table_args__ = (
+        Index("ix_temp_mail_recipient_received", "to", "received_at"),
+        Index("ix_temp_mail_domain_received", "domain", "received_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    recipient: Mapped[str] = mapped_column("to", String(320), primary_key=True)
+    sender: Mapped[str] = mapped_column("from", Text)
+    domain: Mapped[str] = mapped_column(String(253), nullable=False)
+    subject: Mapped[Optional[str]] = mapped_column(Text)
+    raw: Mapped[Optional[str]] = mapped_column(Text)
+    parsed_text: Mapped[Optional[str]] = mapped_column("parsedText", Text)
+    parsed_html: Mapped[Optional[str]] = mapped_column("parsedHtml", Text)
+    url: Mapped[Optional[str]] = mapped_column(Text)
+    ai_extract_type: Mapped[Optional[str]] = mapped_column("aiExtractType", Text)
+    ai_extract_result: Mapped[Optional[Any]] = mapped_column("aiExtractResult", JSON)
+    ai_extract_result_text: Mapped[Optional[str]] = mapped_column(
+        "aiExtractResultText", Text
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 Index(
     "uq_tg_accounts_user_id_not_null",
     TgAccount.user_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import tempfile
 import time
 import urllib.request
@@ -52,6 +53,7 @@ from app.services.login_email_protection import (
 from app.services.rate_limit import RateGate, get_rate, validate_rate_values
 from app.services.security_health import SecurityHealthReport, run_security_health_check
 from app.services.targets import canonicalize_target_ref, require_allowed_target
+from app.services.temp_mail import store_temp_mail_payload
 from app.tg import account_ops, batch_ops
 from app.tg.client_pool import ClientPool
 from app.webapp.auth import MiniAppUser, require_admin
@@ -75,10 +77,10 @@ async def error_middleware(request: web.Request, handler):
     except web.HTTPException:
         raise
     except (KeyError, ValueError) as exc:
-        logger.info("Invalid Mini App request %s %s: %s", request.method, request.path, exc)
+        logger.info("Invalid web request %s %s: %s", request.method, request.path, exc)
         raise web.HTTPBadRequest(text=str(exc)[:500] or "请求参数无效") from exc
     except Exception:
-        logger.exception("Mini App request failed: %s %s", request.method, request.path)
+        logger.exception("Web request failed: %s %s", request.method, request.path)
         raise web.HTTPInternalServerError(text="服务器处理失败，请稍后重试")
 
 
@@ -122,6 +124,24 @@ def download_url_to_file(url: str, path: Path) -> None:
     if not header.startswith((b"\xff\xd8\xff", b"\x89PNG", b"RIFF", b"GIF8")):
         raise ValueError("接口返回的不是可识别图片")
     path.write_bytes(payload)
+
+
+async def temp_mail_webhook(request: web.Request) -> web.Response:
+    configured_secret = settings.temp_mail_webhook_secret
+    provided_secret = request.headers.get("X-Temp-Mail-Secret", "")
+    if not configured_secret:
+        raise web.HTTPServiceUnavailable(text="webhook is not configured")
+    if not secrets.compare_digest(provided_secret, configured_secret):
+        raise web.HTTPUnauthorized(text="unauthorized")
+    if request.content_type != "application/json":
+        raise web.HTTPUnsupportedMediaType(text="application/json required")
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="JSON object required")
+    sessionmaker = request.app["sessionmaker"]
+    async with sessionmaker() as session:
+        stored = await store_temp_mail_payload(session, payload)
+    return web.json_response({"ok": True, "stored": stored})
 
 
 def account_payload(account: TgAccount) -> dict[str, Any]:
@@ -1479,6 +1499,7 @@ async def create_webapp(
     app["pending_twofa"] = {}
     app["pending_login_email"] = {}
     app.on_cleanup.append(cleanup_pending_logins)
+    app.router.add_post("/webhooks/temp-mail", temp_mail_webhook)
     app.router.add_get("/mini-app", index)
     app.router.add_get("/mini-app/", index)
     app.router.add_static("/mini-app/static", STATIC_DIR)

@@ -115,15 +115,13 @@ async def run_security_health_check(
         )
     )
 
-    credentials_ready = bool(
-        settings.login_email_gmail_username and settings.login_email_gmail_app_password
-    )
+    credentials_ready = bool(settings.temp_mail_webhook_secret)
     checks.append(
         _check(
-            "Gmail 配置",
+            "Temp Mail Webhook 配置",
             credentials_ready,
-            "用户名和应用专用密码已加载" if credentials_ready else "用户名或应用专用密码缺失",
-            "补全 LOGIN_EMAIL_GMAIL_USERNAME 和 LOGIN_EMAIL_GMAIL_APP_PASSWORD；必须使用应用专用密码，然后重启服务。",
+            "Webhook secret 已加载" if credentials_ready else "Webhook secret 缺失",
+            "在 .env 配置 TEMP_MAIL_WEBHOOK_SECRET，然后重启服务。",
         )
     )
 
@@ -135,29 +133,29 @@ async def run_security_health_check(
             f"当前域名 @{selected_domain}，共 {len(domains)} 个候选域名"
             if domain_ready
             else "没有有效的当前域名，或当前域名不在候选列表中",
-            "进入“邮箱域名管理”添加 catch-all 域名并点选一个当前域名，同时确认邮件会转发到所配置 Gmail。",
+            "进入“邮箱域名管理”添加允许的 Temp Mail 域名并点选一个当前域名。",
         )
     )
 
     if credentials_ready:
-        gmail_ok = await client_pool.check_login_email_health()
-        gmail_error = getattr(client_pool, "login_email_health_error", None)
+        temp_mail_ok = await client_pool.check_login_email_health()
+        temp_mail_error = getattr(client_pool, "login_email_health_error", None)
         checks.append(
             _check(
-                "Gmail IMAP 实测",
-                gmail_ok and not gmail_error,
-                "登录成功且邮箱目录可只读访问"
-                if gmail_ok and not gmail_error
-                else f"连接失败：{gmail_error or '未知错误'}",
-                "确认 Gmail 已启用 IMAP、应用专用密码正确、IMAP 主机/端口可达，并检查服务器时间与出站网络。",
+                "Temp Mail 存储实测",
+                temp_mail_ok and not temp_mail_error,
+                "Webhook secret 和邮件数据表可用"
+                if temp_mail_ok and not temp_mail_error
+                else f"检测失败：{temp_mail_error or '未知错误'}",
+                "确认 TEMP_MAIL_WEBHOOK_SECRET 已配置、数据库迁移已执行，并检查服务日志。",
             )
         )
     else:
         checks.append(
             _warning(
-                "Gmail IMAP 实测",
-                "因 Gmail 配置缺失而跳过",
-                "先补全 Gmail 配置，再重新点击检测。",
+                "Temp Mail 存储实测",
+                "因 Webhook secret 缺失而跳过",
+                "先配置 TEMP_MAIL_WEBHOOK_SECRET，再重新点击检测。",
             )
         )
 

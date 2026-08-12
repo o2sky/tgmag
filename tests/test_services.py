@@ -92,8 +92,8 @@ def test_domain_add_prompt_has_clickable_cancel_button() -> None:
         ),
         ({"connected_count": 0, "protected_connected_count": 0}, "账号均未连接"),
         ({"protected_connected_count": 0}, "已连接账号均在白名单"),
-        ({"health_checked": False}, "Gmail IMAP 尚未检查"),
-        ({"health_error": "bad credentials"}, "Gmail IMAP 不可用"),
+        ({"health_checked": False}, "Temp Mail 存储尚未检查"),
+        ({"health_error": "database unavailable"}, "Temp Mail 存储不可用"),
         ({"connected_count": 1}, "基础链路部分就绪（已连接 1/2）"),
         ({}, "基础链路就绪（待全链路检测）"),
     ],
@@ -179,8 +179,7 @@ def test_full_security_check_uses_current_runtime_state_without_historical_event
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "login_email_protection_enabled", True)
-    monkeypatch.setattr(settings, "login_email_gmail_username", "admin@example.com")
-    monkeypatch.setattr(settings, "login_email_gmail_app_password", "app-password")
+    monkeypatch.setattr(settings, "temp_mail_webhook_secret", "0" * 32)
     monkeypatch.setattr(
         security_health,
         "get_available_domains",

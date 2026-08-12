@@ -16,6 +16,7 @@ def write_env(path: Path, admin_ids: str) -> Path:
                 "DATABASE_URL=postgresql+asyncpg://user:password@127.0.0.1/database",
                 "FERNET_KEY=test-fernet-key",
                 "LOGIN_EMAIL_ALIAS_DOMAINS=mail.example.com",
+                "TEMP_MAIL_WEBHOOK_SECRET=0123456789abcdef0123456789abcdef",
                 "LOGIN_EMAIL_GMAIL_USERNAME=test@example.com",
                 "LOGIN_EMAIL_GMAIL_APP_PASSWORD=test-app-password",
             ]

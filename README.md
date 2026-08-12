@@ -26,7 +26,7 @@
 - Telegram Bot Token
 - Telegram API ID 与 API Hash
 - 公网 HTTPS 域名（仅 Mini App 需要）
-- Gmail 应用专用密码和 catch-all 域名（仅登录邮箱保护需要）
+- Cloudflare Temp Email、Webhook secret 和 catch-all 域名（仅登录邮箱保护需要）
 
 ## 快速开始
 
@@ -106,8 +106,7 @@ python -m app.main
 |---|:---:|---|
 | `LOGIN_EMAIL_PROTECTION_ENABLED` | 否 | 是否启用自动登录邮箱保护，默认 `true`；不使用时设为 `false`。 |
 | `LOGIN_EMAIL_ALIAS_DOMAINS` | 启用邮箱保护时 | catch-all 域名列表；多个域名使用英文逗号分隔，第一个为初始默认域名。 |
-| `LOGIN_EMAIL_GMAIL_USERNAME` | 启用邮箱保护时 | 接收 catch-all 转发邮件的 Gmail 邮箱地址。 |
-| `LOGIN_EMAIL_GMAIL_APP_PASSWORD` | 启用邮箱保护时 | Gmail 应用专用密码，不是 Google 账号的普通登录密码。 |
+| `TEMP_MAIL_WEBHOOK_SECRET` | 启用邮箱保护时 | Cloudflare Temp Email 调用 Webhook 时使用的随机共享密钥。 |
 | `LOGIN_EMAIL_POLL_TIMEOUT_SECONDS` | 否 | 等待 catch-all 转发验证码的时间，默认 `300` 秒（5 分钟）；等待期间不会重复请求验证码。 |
 
 示例：
@@ -115,8 +114,7 @@ python -m app.main
 ```env
 LOGIN_EMAIL_PROTECTION_ENABLED=true
 LOGIN_EMAIL_ALIAS_DOMAINS=mail-a.example.com,mail-b.example.net
-LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
-LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
+TEMP_MAIL_WEBHOOK_SECRET=replace_with_at_least_32_random_characters
 LOGIN_EMAIL_POLL_TIMEOUT_SECONDS=300
 ```
 
@@ -138,7 +136,7 @@ LOGIN_EMAIL_PROTECTION_ENABLED=false
 | `MINI_APP_PORT` | 否 | Mini App 监听端口，默认 `8080`。 |
 
 > [!CAUTION]
-> `.env`、Bot Token、API Hash、数据库密码、Fernet 密钥、Telegram Session 和 Gmail 应用专用密码都属于敏感信息，不要提交到 GitHub。
+> `.env`、Bot Token、API Hash、数据库密码、Fernet 密钥、Telegram Session 和 Webhook secret 都属于敏感信息，不要提交到 GitHub。
 
 ## 生产环境稳定运行
 

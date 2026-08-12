@@ -434,8 +434,7 @@ async def status_text(
     connected_active_ids = active_account_ids.intersection(client_pool.connected_account_ids)
     protected_connected_ids = connected_active_ids.difference(whitelist_ids)
     configuration_ready = bool(
-        settings.login_email_gmail_username
-        and settings.login_email_gmail_app_password
+        settings.temp_mail_webhook_secret
         and selected_domain
     )
     email_guard_status = login_email_runtime_status(
@@ -448,7 +447,7 @@ async def status_text(
         health_checked=client_pool.login_email_health_checked_at is not None,
         health_error=client_pool.login_email_health_error,
     )
-    gmail_status = (
+    temp_mail_status = (
         "未检查"
         if client_pool.login_email_health_checked_at is None
         else "失败"
@@ -464,7 +463,7 @@ async def status_text(
         f"已连接: {len(client_pool.connected_account_ids)}\n"
         f"登录邮箱保护开关: {'开启' if settings.login_email_protection_enabled else '关闭'}\n"
         f"登录邮箱保护状态: {email_guard_status}\n"
-        f"Gmail IMAP: {gmail_status}\n"
+        f"Temp Mail 存储: {temp_mail_status}\n"
         f"自动保护账号: {len(protected_connected_ids)}/{len(active_account_ids)}\n"
         f"保护域名: @{selected_domain or '-'}\n"
         f"保护白名单: {len(whitelist_ids)}\n"
@@ -498,9 +497,9 @@ def login_email_runtime_status(
     if protected_connected_count == 0:
         return "已连接账号均在白名单"
     if not health_checked:
-        return "Gmail IMAP 尚未检查"
+        return "Temp Mail 存储尚未检查"
     if health_error:
-        return "Gmail IMAP 不可用"
+        return "Temp Mail 存储不可用"
     if connected_count < active_count:
         return f"基础链路部分就绪（已连接 {connected_count}/{active_count}）"
     return "基础链路就绪（待全链路检测）"
@@ -2077,12 +2076,9 @@ async def login_email_guard_view(
     configuration_ready = bool(
         domains
         and selected_domain
-        and settings.login_email_gmail_username
-        and settings.login_email_gmail_app_password
+        and settings.temp_mail_webhook_secret
     )
-    credentials_ready = bool(
-        settings.login_email_gmail_username and settings.login_email_gmail_app_password
-    )
+    credentials_ready = bool(settings.temp_mail_webhook_secret)
     protection_status = login_email_runtime_status(
         configuration_ready=configuration_ready,
         monitor_enabled=client_pool.monitor_enabled,
@@ -2093,7 +2089,7 @@ async def login_email_guard_view(
         health_checked=client_pool.login_email_health_checked_at is not None,
         health_error=client_pool.login_email_health_error,
     )
-    gmail_status = (
+    temp_mail_status = (
         "未检查"
         if client_pool.login_email_health_checked_at is None
         else "失败"
@@ -2104,8 +2100,8 @@ async def login_email_guard_view(
         "安全防护中心",
         f"自动换绑开关：{'开启' if settings.login_email_protection_enabled else '关闭'}",
         f"运行状态：{protection_status}",
-        f"Gmail 凭据：{'已填写' if credentials_ready else '未填写'}",
-        f"Gmail IMAP：{gmail_status}",
+        f"Webhook Secret：{'已填写' if credentials_ready else '未填写'}",
+        f"Temp Mail 存储：{temp_mail_status}",
         f"当前域名：@{selected_domain}" if selected_domain else "当前域名：未配置",
         f"实时监听：{'运行中' if client_pool.service_monitor_running else '未运行'}",
         f"自动保护账号：{len(protected_connected_ids)}/{len(active_account_ids)}",
@@ -2118,7 +2114,7 @@ async def login_email_guard_view(
     if not settings.login_email_protection_enabled:
         lines.extend(["", "提示：环境变量中的自动保护开关当前为关闭状态。"])
     elif not credentials_ready:
-        lines.extend(["", "提示：缺少可用的 Gmail 应用专用密码。"])
+        lines.extend(["", "提示：缺少 TEMP_MAIL_WEBHOOK_SECRET。"])
     elif not domains or not selected_domain:
         lines.extend(["", "提示：至少需要配置并选中一个登录邮箱域名。"])
     elif not client_pool.monitor_enabled:
@@ -2132,7 +2128,7 @@ async def login_email_guard_view(
     elif not protected_connected_ids:
         lines.extend(["", "提示：所有已连接账号都在白名单中，只会转发提醒，不会自动换绑。"])
     elif client_pool.login_email_health_error:
-        lines.extend(["", "提示：Gmail IMAP 检查失败，请点击“检查 Gmail”查看具体原因。"])
+        lines.extend(["", "提示：Temp Mail 存储检查失败，请点击“检查 Temp Mail”查看具体原因。"])
     return "\n".join(lines), login_email_guard_panel()
 
 
@@ -2206,17 +2202,17 @@ async def login_email_guard_callback(
             await callback.message.answer(report.render()[:4096], reply_markup=login_email_guard_panel())
         return
     if action == "testimap":
-        if not settings.login_email_gmail_username or not settings.login_email_gmail_app_password:
-            await callback.answer("Gmail 凭据未填写", show_alert=True)
+        if not settings.temp_mail_webhook_secret:
+            await callback.answer("Webhook secret 未填写", show_alert=True)
             return
-        await callback.answer("正在检查 Gmail 连接...")
+        await callback.answer("正在检查 Temp Mail 存储...")
         try:
             await client_pool.check_login_email_health()
             if client_pool.login_email_health_error:
                 raise RuntimeError(client_pool.login_email_health_error)
-            result_text = "Gmail IMAP 检查成功，邮箱目录可只读访问。"
+            result_text = "Temp Mail 检查成功，Webhook secret 和邮件数据表可用。"
         except Exception as exc:
-            result_text = f"Gmail IMAP 检查失败：{str(exc)[:800]}"
+            result_text = f"Temp Mail 检查失败：{str(exc)[:800]}"
         if callback.message:
             await callback.message.answer(result_text, reply_markup=login_email_guard_panel())
         return

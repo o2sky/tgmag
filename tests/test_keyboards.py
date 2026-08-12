@@ -52,7 +52,7 @@ def test_native_bot_menu_opens_configured_mini_app(monkeypatch: pytest.MonkeyPat
     assert payload["web_app"]["url"].endswith("/mini-app")
 
 
-def test_security_center_separates_domains_whitelist_events_and_gmail() -> None:
+def test_security_center_separates_domains_whitelist_events_and_temp_mail() -> None:
     callbacks = {
         button.callback_data for row in login_email_guard_panel().inline_keyboard for button in row
     }

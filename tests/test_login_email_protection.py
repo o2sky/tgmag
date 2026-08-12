@@ -446,10 +446,10 @@ def test_protection_failure_reasons_explain_mail_delay_and_flood_wait(monkeypatc
     flood_reason = LoginEmailProtector._friendly_failure_reason(FloodWaitError(None, 600))
 
     assert "5 分钟内未收到" in timeout_reason
-    assert "Cloudflare Email Routing" in timeout_reason
-    assert "Gmail 421/4.7.28" in timeout_reason
+    assert "Temp Mail Webhook" in timeout_reason
+    assert "Cloudflare Temp Email" in timeout_reason
     assert "Telegram 已受理发码" in timeout_reason
-    assert "Activity" in timeout_reason
+    assert "Webhook 投递记录" in timeout_reason
     assert "未自动重发" in timeout_reason
     assert "Telegram 限制尝试次数" in flood_reason
     assert "20:10:00" in flood_reason
