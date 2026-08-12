@@ -28,7 +28,7 @@
 - PostgreSQL 14+
 - Telegram Bot Token
 - Telegram API ID 与 API Hash
-- 公网 HTTPS 域名（仅 Mini App 需要）
+- 公网 HTTPS 域名（Mini App 或 TempMail Webhook 需要）
 - Cloudflare Temp Email、Webhook secret 和 catch-all 域名（仅登录邮箱保护需要）
 
 ## 快速开始
