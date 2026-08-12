@@ -1470,7 +1470,6 @@ async def target_allowlist(message: Message, sessionmaker: async_sessionmaker[As
             target_ref = canonicalize_target_ref(a[2])
             exists = await session.scalar(
                 select(AllowedTarget.id).where(
-                    AllowedTarget.target_type == a[1],
                     AllowedTarget.target_ref == target_ref,
                 )
             )
