@@ -123,6 +123,7 @@ def test_domain_backend_selection_is_persisted(monkeypatch) -> None:
             self.committed = True
 
     session = Session()
+    monkeypatch.setattr("app.config.settings.temp_mail_webhook_secret", "0" * 32)
     monkeypatch.setattr(
         "app.config.settings.login_email_gmail_username", "owner@gmail.com"
     )

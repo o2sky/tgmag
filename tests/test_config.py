@@ -57,6 +57,7 @@ def test_gmail_only_configuration_remains_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TEMP_MAIL_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("LOGIN_EMAIL_PROTECTION_ENABLED", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -87,6 +88,7 @@ def test_domain_backend_requires_matching_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TEMP_MAIL_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("LOGIN_EMAIL_PROTECTION_ENABLED", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
