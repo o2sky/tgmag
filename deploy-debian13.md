@@ -1,16 +1,12 @@
-# 部署指南（Debian 13）
+# 部署指南（Debian 13 Trixie · root 用户）
 
 <!-- markdownlint-disable MD013 -->
 
-本文档给出一套可复制的 **Debian 13** 生产部署流程：独立系统用户、Python venv、PostgreSQL 17、systemd，以及可选的 Nginx HTTPS、Telegram Mini App、Cloudflare Temp Email 和 Gmail 登录邮箱保护。每个收件域名可以独立选择 Cloudflare 或 Gmail 后端。
-
-> **Debian 13 注意事项**
->
-> - Python 默认版本为 **3.13**，`python3-pip` 在 venv 外受 PEP 668 限制，不能直接 `pip install`；所有依赖安装必须在 venv 内执行（本文已统一使用 `.venv/bin/python -m pip`）。
-> - PostgreSQL 默认版本为 **17**，软件包名为 `postgresql`，行为与 Debian 12 一致。
-> - `useradd` 参数与 Debian 12 相同，无需修改。
+本文档给出一套可复制的 Debian 13 生产部署流程：独立系统用户、Python venv、PostgreSQL 17、systemd，以及可选的 Nginx HTTPS、Telegram Mini App、Cloudflare Temp Email 和 Gmail 登录邮箱保护。每个收件域名可以独立选择 Cloudflare 或 Gmail 后端。
 
 示例部署目录为 `/opt/tg-account-bot`，服务用户为 `tg-account-bot`。命令中的域名、用户 ID、密码和 Token 都是占位值，必须替换。
+
+> **说明**：本指南在 root 用户下执行，所有命令均去掉了 `sudo` 前缀。
 
 ---
 
@@ -35,62 +31,64 @@
 
 ---
 
-## 2. 安装系统依赖和代码
+## 2. 安装系统依赖
+
+更新系统并安装所需软件包：
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  git python3 python3-venv build-essential libpq-dev \
-  postgresql postgresql-client
+apt update && apt upgrade -y
+apt install -y \
+  git python3 python3-venv python3-pip build-essential libpq-dev \
+  curl ca-certificates
 ```
-
-> **说明**：Debian 13 上 `python3-pip` 受 PEP 668 保护，系统级 pip 无法安装第三方包。本文所有依赖均在 venv 内安装，因此不需要安装 `python3-pip`。
-
-创建不允许交互登录的服务用户：
-
-```bash
-sudo useradd --system --user-group \
-  --home-dir /opt/tg-account-bot \
-  --shell /usr/sbin/nologin \
-  tg-account-bot
-```
-
-如果该用户已存在，可跳过 `useradd`。克隆项目并设置权限：
-
-```bash
-sudo git clone https://github.com/openhomek/tgmag.git /opt/tg-account-bot
-sudo chown -R tg-account-bot:tg-account-bot /opt/tg-account-bot
-```
-
-创建 venv 并安装依赖（所有后续操作均在 venv 内进行）：
-
-```bash
-sudo -u tg-account-bot python3 -m venv /opt/tg-account-bot/.venv
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pip install --upgrade pip wheel
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pip install \
-  -r /opt/tg-account-bot/requirements.txt
-sudo install -d -o tg-account-bot -g tg-account-bot -m 700 \
-  /opt/tg-account-bot/data/sessions \
-  /opt/tg-account-bot/data/backups
-```
-
-> **说明**：后续所有命令均使用绝对路径 `/opt/tg-account-bot/.venv/bin/...`，避免因工作目录不同导致找不到 venv。
 
 ---
 
-## 3. 创建 PostgreSQL 数据库
+## 3. 安装 PostgreSQL 17
 
-创建数据库用户时会交互式要求输入两次新密码，避免把明文密码写进 Shell 历史：
+Debian 13 默认仓库已包含 PostgreSQL 17，直接安装即可：
 
 ```bash
-sudo -u postgres createuser --pwprompt tg_bot
-sudo -u postgres createdb --owner=tg_bot tg_account_bot
+apt install -y postgresql postgresql-client postgresql-contrib
+```
+
+安装完成后确认服务已启动：
+
+```bash
+systemctl status postgresql --no-pager
+```
+
+看到 `active (running)` 即为正常。确认版本：
+
+```bash
+psql --version
+```
+
+### 3.1 创建数据库用户和数据库
+
+切换到 `postgres` 系统用户，进行数据库操作：
+
+```bash
+su - postgres
+```
+
+在 postgres shell 中创建用户（会交互式要求输入两次密码，避免密码写入 Shell 历史）：
+
+```bash
+createuser --pwprompt tg_bot
+createdb --owner=tg_bot tg_account_bot
 ```
 
 确认数据库存在：
 
 ```bash
-sudo -u postgres psql -c '\l tg_account_bot'
+psql -c '\l tg_account_bot'
+```
+
+退出 postgres 用户：
+
+```bash
+exit
 ```
 
 对应连接串格式：
@@ -99,17 +97,48 @@ sudo -u postgres psql -c '\l tg_account_bot'
 DATABASE_URL=postgresql+asyncpg://tg_bot:数据库密码@127.0.0.1:5432/tg_account_bot
 ```
 
-如果密码包含 `@`、`:`、`/`、`#`、`%` 等字符，必须先进行 URL 百分号编码。为减少配置错误，建议使用足够长的纯字母数字密码。
+如果密码包含 `@`、`:`、`/`、`#`、`%` 等字符，必须先进行 URL 百分号编码。为减少配置错误，建议使用足够长的字母数字密码。
 
 ---
 
-## 4. 创建 `.env`
+## 4. 安装代码
+
+创建不允许交互登录的服务用户：
 
 ```bash
-sudo install -o tg-account-bot -g tg-account-bot -m 600 \
-  /opt/tg-account-bot/.env.example \
-  /opt/tg-account-bot/.env
-sudoedit /opt/tg-account-bot/.env
+useradd --system --user-group \
+  --home-dir /opt/tg-account-bot \
+  --shell /usr/sbin/nologin \
+  tg-account-bot
+```
+
+如果该用户已存在，可跳过 `useradd`。克隆项目并设置权限：
+
+```bash
+git clone https://github.com/o2sky/tgmag.git /opt/tg-account-bot
+chown -R tg-account-bot:tg-account-bot /opt/tg-account-bot
+cd /opt/tg-account-bot
+```
+
+创建 venv 并安装依赖：
+
+```bash
+su -s /bin/bash tg-account-bot -c "python3 -m venv /opt/tg-account-bot/.venv"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pip install --upgrade pip wheel"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pip install -r /opt/tg-account-bot/requirements.txt"
+install -d -o tg-account-bot -g tg-account-bot -m 700 \
+  /opt/tg-account-bot/data/sessions \
+  /opt/tg-account-bot/data/backups
+```
+
+---
+
+## 5. 创建 `.env`
+
+```bash
+cd /opt/tg-account-bot
+install -o tg-account-bot -g tg-account-bot -m 600 .env.example .env
+nano .env
 ```
 
 最小可启动配置如下：
@@ -135,12 +164,7 @@ LOGIN_EMAIL_GMAIL_USERNAME=your-account@gmail.com
 LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 ```
 
-`.env` 由 Pydantic 在进程启动时读取，注意：
-
-- 布尔值使用 `true`/`false`。
-- 列表值（如 `LOGIN_EMAIL_ALIAS_DOMAINS`）使用英文逗号分隔，不要对整行套引号。
-- 密码等纯字符串值若含特殊字符，可用单引号包裹整个值，例如 `KEY='pa$$word'`。
-
+`.env` 由 Pydantic 在进程启动时读取。布尔值使用 `true`/`false`；列表使用英文逗号分隔，不要给整行额外套引号。
 登录邮箱保护默认开启，因此至少需要一个 catch-all 域名，并完整配置该域名所选后端的凭据。只用 Cloudflare 时可省略 Gmail 凭据，只用 Gmail 时可省略 Webhook secret；明确不使用该功能时将开关设为 `false`。
 
 ### 环境变量完整说明
@@ -177,29 +201,19 @@ LOGIN_EMAIL_GMAIL_APP_PASSWORD=replace_with_google_app_password
 | `LOGIN_EMAIL_POLL_INTERVAL_SECONDS` | 否 | `3`，数据库轮询间隔；允许 1–30 秒 |
 | `LOGIN_EMAIL_CATCHUP_SECONDS` | 否 | `180`，服务重连时补拉近期登录提醒的时间窗口 |
 
-每个 TG 账号的等待窗口在 Mini App 账号详情的"登录邮箱保护"中独立设置，单位为整数小时，允许 `0–720`，默认 `0`（收到有效登录提醒后立即换绑）。大于 `0` 时，窗口内的新提醒仍逐条转发给管理员，只累计次数且不会延长窗口；到期后执行一次换绑并发送汇总结果。修改只影响之后的新窗口，服务重启后会恢复尚未结束的窗口。catch-all 转发可能延迟，系统在等待邮件期间不会重复发码，避免触发 Telegram 尝试次数限制。
-
 ---
 
-## 5. 生成并保管 Fernet 密钥
-
-**先保存并关闭上一步打开的 `.env` 编辑器**，再执行以下命令生成密钥：
+## 6. 生成并保管 Fernet 密钥
 
 ```bash
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python - <<'PY'
+cd /opt/tg-account-bot
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python - <<'PY'
 from cryptography.fernet import Fernet
 print(Fernet.generate_key().decode())
-PY
+PY"
 ```
 
-把输出完整写入 `.env` 的 `FERNET_KEY`：
-
-```bash
-sudoedit /opt/tg-account-bot/.env
-# 找到 FERNET_KEY= 这一行，把上面的输出粘贴进去
-```
-
-注意：
+把输出完整写入 `.env` 的 `FERNET_KEY`。注意：
 
 - 不要提交到 Git，也不要和数据库备份放在同一个位置。
 - 运行后随意更换密钥会导致已有手机号、Session、2FA 和邮箱数据无法解密。
@@ -207,71 +221,58 @@ sudoedit /opt/tg-account-bot/.env
 
 ---
 
-## 6. 初始化数据库并运行检查
+## 7. 初始化数据库并运行检查
 
 应用不会自动创建或升级表。首次部署和每次升级代码后，都必须执行：
 
 ```bash
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/alembic \
-  --config /opt/tg-account-bot/alembic.ini \
-  upgrade head
+cd /opt/tg-account-bot
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/alembic upgrade head"
 ```
 
-安装开发依赖并运行检查：
+运行测试和静态编译检查：
 
 ```bash
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pip install \
-  -r /opt/tg-account-bot/requirements-dev.txt
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pytest \
-  --rootdir=/opt/tg-account-bot -q
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m compileall -q \
-  /opt/tg-account-bot/app \
-  /opt/tg-account-bot/tests \
-  /opt/tg-account-bot/alembic
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/alembic \
-  --config /opt/tg-account-bot/alembic.ini \
-  current
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pip install -r /opt/tg-account-bot/requirements-dev.txt"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pytest -q"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m compileall -q app tests alembic"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/alembic current"
 ```
 
 需要前台排错时：
 
 ```bash
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python \
-  -m app.main \
-  --directory /opt/tg-account-bot
+su -s /bin/bash tg-account-bot -c "cd /opt/tg-account-bot && .venv/bin/python -m app.main"
 ```
 
 看到 Bot 开始 polling 且无数据库迁移错误后，用 `Ctrl+C` 停止，再配置 systemd。
 
 ---
 
-## 7. 配置 systemd
+## 8. 配置 systemd
 
 仓库内服务文件已经使用 `/opt/tg-account-bot` 和 `tg-account-bot`：
 
 ```bash
-sudo install -m 644 /opt/tg-account-bot/ops/systemd/tg-account-bot.service \
+install -m 644 /opt/tg-account-bot/ops/systemd/tg-account-bot.service \
   /etc/systemd/system/tg-account-bot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now tg-account-bot
+systemctl daemon-reload
+systemctl enable --now tg-account-bot
 ```
 
 检查服务：
 
 ```bash
-sudo systemctl status tg-account-bot --no-pager
-sudo journalctl -u tg-account-bot -n 100 --no-pager
-sudo journalctl -u tg-account-bot -f
+systemctl status tg-account-bot --no-pager
+journalctl -u tg-account-bot -n 100 --no-pager
+journalctl -u tg-account-bot -f
 ```
 
 如果改变部署目录或服务用户，必须同步修改 unit 中的 `WorkingDirectory`、`EnvironmentFile`、`ExecStart`、`User`、`Group` 和 `ReadWritePaths`。
 
 ---
 
-## 8. 配置 Telegram Mini App 与 HTTPS（可选）
+## 9. 配置 Telegram Mini App 与 HTTPS（可选）
 
 Mini App 必须通过 Telegram 客户端可访问的 HTTPS 地址打开。应用本身建议只监听回环地址：
 
@@ -286,7 +287,7 @@ MINI_APP_AUTH_MAX_AGE_SECONDS=3600
 安装 Nginx 与 Certbot：
 
 ```bash
-sudo apt-get install -y nginx certbot python3-certbot-nginx
+apt install -y nginx certbot python3-certbot-nginx
 ```
 
 创建 `/etc/nginx/sites-available/tg-account-bot`：
@@ -311,12 +312,11 @@ server {
 启用站点并申请证书：
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/tg-account-bot \
-  /etc/nginx/sites-enabled/tg-account-bot
-sudo nginx -t
-sudo systemctl reload nginx
-sudo certbot --nginx -d bot.example.com
-sudo systemctl restart tg-account-bot
+ln -s /etc/nginx/sites-available/tg-account-bot /etc/nginx/sites-enabled/tg-account-bot
+nginx -t
+systemctl reload nginx
+certbot --nginx -d bot.example.com
+systemctl restart tg-account-bot
 ```
 
 验证公网响应：
@@ -325,30 +325,18 @@ sudo systemctl restart tg-account-bot
 curl -I https://bot.example.com/mini-app
 ```
 
-验证 Mini App 内部端口只在本机监听：
-
-```bash
-ss -lntp | grep 8080
-```
-
-### 8.1 配置机器人资料页的"打开应用"按钮
-
-聊天内的菜单按钮和机器人资料页按钮是两个不同入口。要实现类似 `@BotFather` 的效果，让用户无需先进入对话就能从资料页直接打开：
+### 9.1 配置机器人资料页的"打开应用"按钮
 
 1. 打开 `@BotFather`，发送 `/mybots` 并选择对应机器人。
 2. 进入 `Bot Settings` → `Configure Mini App` → `Enable Mini App`。
 3. 按提示填写上面的 `MINI_APP_PUBLIC_URL`，并上传适合手机页面的预览图。
 4. 返回机器人资料页，确认出现 `Launch app` 或"打开应用"按钮。
 
-配置完成后也可以使用 `https://t.me/<bot_username>?startapp` 直接打开主 Mini App；需要传递场景参数时使用 `?startapp=<command>`。这个资料页按钮只能通过 `@BotFather` 配置，Bot API 无法代替管理员启用它。
-
-聊天内仍可发送 `/app` 打开同一个页面。Mini App API 会校验 Telegram `initData` 签名和管理员身份，因此直接用普通浏览器访问页面后出现未授权 API 响应是正常现象。
-
 ---
 
-## 9. 配置登录邮箱保护（可选）
+## 10. 配置登录邮箱保护（可选）
 
-### 9.1 邮件侧准备
+### 10.1 邮件侧准备
 
 先为每个域名决定接收后端；同一部署可以混合使用：
 
@@ -357,15 +345,15 @@ ss -lntp | grep 8080
 | `cloudflare` | Send to Worker → Cloudflare Temp Email | Worker POST Webhook，程序读 PostgreSQL |
 | `gmail` | Send to email → 已验证的 Gmail 地址 | 程序通过 Gmail IMAP 读取 |
 
-**Cloudflare 后端**：先生成随机 secret：
+Cloudflare 后端需要生成随机 secret：
 
 ```bash
 openssl rand -hex 32
 ```
 
-把输出填入 `.env` 的 `TEMP_MAIL_WEBHOOK_SECRET`。再把 `/webhooks/temp-mail` 通过现有 HTTPS 反向代理转发到内置 Web 服务，并在 Worker 全局 Webhook 中发送 `X-Temp-Mail-Secret`。完整 Worker、D1、KV、Email Routing 和 Apache 实例配置见 [README 的 Cloudflare 部署章节](README.md#tempmail--cloudflare-temp-email-部署backend-only)。
+把输出填入 `TEMP_MAIL_WEBHOOK_SECRET`，并在 Worker 全局 Webhook 中发送 `X-Temp-Mail-Secret`。
 
-**Gmail 后端**：为接收账号启用两步验证并创建应用专用密码，再把该 Gmail 地址作为 Email Routing 的已验证目标。应用密码只保存在 `.env`，不能提交到仓库。
+Gmail 后端需要为接收账号启用两步验证并创建应用专用密码，再把该 Gmail 地址作为 Email Routing 的已验证目标。
 
 配置示例：
 
@@ -388,26 +376,22 @@ LOGIN_EMAIL_CATCHUP_SECONDS=180
 保存后重启服务：
 
 ```bash
-sudo systemctl restart tg-account-bot
-sudo journalctl -u tg-account-bot -n 100 --no-pager
+systemctl restart tg-account-bot
+journalctl -u tg-account-bot -n 100 --no-pager
 ```
 
-### 9.2 Bot 内验证
+### 10.2 Bot 内验证
 
 1. 发送 `/security`。
 2. 打开"邮箱域名管理"，点击域名可选择默认域名；点击右侧 `CF TempMail` / `Gmail` 可切换该域名的读取后端。
 3. 确认 Telegram 显示的后端与邮件路由平台的实际 Catch-all 完全一致。
 4. 使用"检查邮件接收"验证当前所有域名使用到的后端。
-5. 把本人会主动登录的账号加入白名单；这些账号仅转发提醒，不自动换绑。
+5. 把本人会主动登录的账号加入白名单。
 6. 对非白名单测试账号触发一次真实登录提醒，观察成功或失败通知。
-
-环境变量提供初始域名、后端映射和凭据。Bot 中增删域名、当前默认域名和逐域名后端选择会保存在 PostgreSQL，后续以数据库值为准。程序不会代替管理员修改 Cloudflare Email Routing：应先手动更改 Catch-all，再在 Telegram 中切换后端。若 Telegram 返回 `EMAIL_NOT_ALLOWED`，说明该域名不被接受；在失败通知下点击快捷换绑按钮，改选其他域名重试。
-
-程序会校验邮件发件人、目标别名、Login 用途、邮件时间，以及标题和正文验证码是否一致。它不会因为白名单账号的提醒而换绑，也不会主动终止其他会话。
 
 ---
 
-## 10. 防火墙与权限建议
+## 11. 防火墙与权限建议
 
 - 只向公网开放 SSH、80 和 443；不要公开 PostgreSQL 5432 或 Mini App 内部端口 8080。
 - `.env`、`data/sessions`、`data/backups` 保持仅服务用户可读写。
@@ -417,17 +401,17 @@ sudo journalctl -u tg-account-bot -n 100 --no-pager
 
 ---
 
-## 11. 备份与恢复
+## 12. 备份与恢复
 
-管理员在 Bot 中发送 `/backup` 会在 `BACKUP_DIR` 创建 PostgreSQL custom-format 备份，文件权限为 `0600`。也可以手动执行（执行时会提示输入数据库密码，或提前在 `~tg-account-bot/.pgpass` 中配置免密）：
+管理员在 Bot 中发送 `/backup` 会在 `BACKUP_DIR` 创建 PostgreSQL custom-format 备份，文件权限为 `0600`。也可以手动执行：
 
 ```bash
-sudo -u tg-account-bot pg_dump \
+su -s /bin/bash tg-account-bot -c "pg_dump \
   --format=custom \
   --file=/opt/tg-account-bot/data/backups/manual.dump \
   --dbname=tg_account_bot \
   --host=127.0.0.1 \
-  --username=tg_bot
+  --username=tg_bot"
 ```
 
 检查备份：
@@ -440,53 +424,67 @@ pg_restore --list /opt/tg-account-bot/data/backups/manual.dump
 
 ---
 
-## 12. 升级
+## 13. 升级
 
 先备份数据库和 `.env`，再执行：
 
 ```bash
-sudo -u tg-account-bot git -C /opt/tg-account-bot pull --ff-only
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pip install \
-  -r /opt/tg-account-bot/requirements.txt
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/alembic \
-  --config /opt/tg-account-bot/alembic.ini \
-  upgrade head
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/python -m pytest \
-  --rootdir=/opt/tg-account-bot -q
-
-sudo systemctl restart tg-account-bot
-sudo systemctl status tg-account-bot --no-pager
+cd /opt/tg-account-bot
+su -s /bin/bash tg-account-bot -c "git pull --ff-only"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pip install -r /opt/tg-account-bot/requirements.txt"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/alembic upgrade head"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/python -m pytest -q"
+systemctl restart tg-account-bot
+systemctl status tg-account-bot --no-pager
 ```
 
 如果新版本迁移失败，不要反复重启服务。保留日志、当前代码版本和迁移输出，再决定修复或从升级前备份恢复。
 
 ---
 
-## 13. 常见故障
+## 14. 常见故障
 
 ### 服务启动后立即退出
 
 ```bash
-sudo journalctl -u tg-account-bot -n 200 --no-pager
+journalctl -u tg-account-bot -n 200 --no-pager
 ```
 
 - `ValidationError`：`.env` 缺少必需值或字段格式错误。
-- `数据库尚未初始化` / `迁移版本...`：执行 `alembic upgrade head`（见第 6 节）。
-- `Permission denied`：检查 `/opt/tg-account-bot`、`.env` 和 `data/` 的属主与权限。
+- `数据库尚未初始化` / `迁移版本...`：执行 `.venv/bin/alembic upgrade head`。
+- `Permission denied`：检查 `/opt/tg-account-bot`、`.env` 和 `data/` 的属主权限：
+
+  ```bash
+  ls -la /opt/tg-account-bot/
+  stat /opt/tg-account-bot/.env
+  ```
+
 - Bot polling 冲突：同一 Bot Token 还有另一个实例在调用 `getUpdates`，停止重复实例。
-- `externally-managed-environment`：误用了系统 pip 而非 venv 内的 pip；使用本文的绝对路径形式。
+
+### PostgreSQL 连接失败
+
+```bash
+# 确认服务运行
+systemctl status postgresql --no-pager
+
+# 确认数据库和用户存在
+su - postgres -c "psql -c '\l'" 
+su - postgres -c "psql -c '\du'"
+
+# 手动测试连接
+psql postgresql://tg_bot:密码@127.0.0.1:5432/tg_account_bot -c 'SELECT 1'
+```
+
+如果 `pg_hba.conf` 拒绝连接（`Ident authentication failed`），确认连接串使用了 `127.0.0.1` 而非 `localhost`，Debian 默认对 IPv4 本地连接使用 `md5`/`scram-sha-256` 认证。
 
 ### 主 ReplyKeyboard 找不到
 
-发送 `/menu`。服务每次启动也会向管理员发送带主键盘的启动消息。项目不会发送 `ReplyKeyboardRemove`。
+发送 `/menu`。服务每次启动也会向管理员发送带主键盘的启动消息。
 
 ### Mini App 无法打开
 
 - `MINI_APP_PUBLIC_URL` 必须是完整 HTTPS 地址，并以 `/mini-app` 结尾。
-- 用 `curl -I https://bot.example.com/mini-app` 验证 Nginx 与证书。
+- 用 `curl -I` 验证 Nginx 与证书。
 - 确认 8080 只在本机监听：`ss -lntp | grep 8080`。
 - 直接浏览器调用 API 缺少 Telegram `initData` 时会返回 401，这是预期行为。
 
@@ -497,17 +495,13 @@ sudo journalctl -u tg-account-bot -n 200 --no-pager
 - Gmail 域名确认 catch-all 已投递到配置账号，应用专用密码有效且 IMAP 目录正确。
 - 在 Telegram 的"邮箱域名管理"确认每个域名选择的后端与实际 Catch-all 一致。
 - 确认发件人为配置的 `LOGIN_EMAIL_SENDER`。
-- 检查服务器时间是否准确；取码会校验数据库收件时间窗口。
-- Telegram 不接受域名时会通知失败，可从 InlineKeyboard 选择其他配置域名重试。
+- 检查服务器时间是否准确：`timedatectl status`。
 
 ### 检查当前版本与迁移
 
 ```bash
-sudo -u tg-account-bot git -C /opt/tg-account-bot rev-parse --short HEAD
-
-sudo -u tg-account-bot /opt/tg-account-bot/.venv/bin/alembic \
-  --config /opt/tg-account-bot/alembic.ini \
-  current
-
-sudo systemctl show tg-account-bot -p ActiveState -p SubState -p NRestarts
+cd /opt/tg-account-bot
+su -s /bin/bash tg-account-bot -c "git rev-parse --short HEAD"
+su -s /bin/bash tg-account-bot -c "/opt/tg-account-bot/.venv/bin/alembic current"
+systemctl show tg-account-bot -p ActiveState -p SubState -p NRestarts
 ```
