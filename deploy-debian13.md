@@ -111,6 +111,7 @@ useradd --system --user-group \
 ```bash
 git clone https://github.com/o2sky/tgmag.git /opt/tg-account-bot
 chown -R tg-account-bot:tg-account-bot /opt/tg-account-bot
+cd /opt/tg-account-bot
 ```
 
 创建 venv 并安装依赖：
